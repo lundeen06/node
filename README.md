@@ -1,13 +1,13 @@
 # node
 
-**node** is a constellation management platform: situational awareness (Mapbox globe) and an AI agent that proposes maneuvers backed by a **typed Python function library** (propagation, screening, solvers, validation, gated actions).
+**node** is a constellation management platform: situational awareness (**Three.js** globe with propagated orbits) and an AI agent that proposes maneuvers backed by a **typed Python function library** (propagation, screening, solvers, validation, gated actions).
 
 This repository is a **scaffold**: Pydantic models and function signatures are production-shaped, but implementations are stubs (`raise NotImplementedError`). The web app is a polished **demo shell** with mock data.
 
 ## Layout
 
 - `apps/api` — FastAPI + `node_api` package (types + `lib/` + `routes/`)
-- `apps/web` — Next.js (App Router) + Mapbox GL JS + Tailwind + shadcn-style UI components
+- `apps/web` — Next.js (App Router) + Three.js + Tailwind + shadcn-style UI components
 - `docs/` — architecture notes and domain glossary
 
 ## API (Python)
@@ -47,13 +47,14 @@ uvicorn node_api.main:app --reload --host 127.0.0.1 --port 8000
 cd apps/web
 npm install
 cp .env.local.example .env.local
-# set NEXT_PUBLIC_MAPBOX_TOKEN (public token is fine for local dev)
-# optional: NEXT_PUBLIC_MAPBOX_STYLE_URL for a custom Mapbox Studio style
+# optional: NEXT_PUBLIC_EARTH_ALBEDO_URL for NASA (or other) equirectangular Earth imagery
 
 npm run dev
 ```
 
 Open `http://localhost:3000` (redirects to `/ops`). Prefer a normal browser window (Chrome/Firefox/Safari), not a stripped-down embedded preview, so `/_next/static/...` assets load reliably.
+
+**Globe:** `apps/web/src/components/globe/earthGlobeRenderer.ts` builds the Earth sphere, **OrbitControls**, and time-stepped satellites from `getSatelliteECEF` in `apps/web/src/lib/orbit/satellite-propagation.ts` (replace with SGP4). Positions are **ECEF meters** converted to the scene via `ecefToSceneVector3` in `apps/web/src/lib/orbit/ecefThree.ts`.
 
 ### Web: Console “SES / lockdown-install.js”
 
@@ -80,11 +81,10 @@ Those URLs are **compiled on demand** in `next dev`. A **500** almost always mea
 
 You may still see a harmless webpack log: **`PackFileCacheStrategy` / `Unable to snapshot resolve dependencies`** — unrelated to the 500 above.
 
-### Web: Mapbox blank map or build issues
+### Web: Three.js / WebGL issues
 
-1. **`apps/web/next.config.js`** — must include `transpilePackages: ["mapbox-gl"]` so webpack transpiles Mapbox (otherwise the map often stays blank).
-2. **`apps/web/src/components/globe/Globe.tsx`** — client map setup; check the browser console for `[Globe]` logs if something fails.
-3. **`apps/web/.env.local`** — `NEXT_PUBLIC_MAPBOX_TOKEN` (and optional `NEXT_PUBLIC_MAPBOX_STYLE_URL`); restart `npm run dev` after changes.
+- **`apps/web/next.config.js`** — `transpilePackages: ["three"]` so webpack resolves `three/addons/...` cleanly.
+- If the globe canvas is blank, open the browser **console** for WebGL or texture load errors (invalid `NEXT_PUBLIC_EARTH_ALBEDO_URL`, CORS on remote textures, etc.).
 
 ### Web: `pnpm` + Corepack “Cannot find matching keyid”
 
@@ -105,9 +105,7 @@ If `pnpm dev` fails with `Error: Cannot find matching keyid`, your **Corepack** 
 | Variable | App | Purpose |
 |----------|-----|---------|
 | `NODE_*` | API | See `apps/api/src/node_api/config.py` (`NODE_APP_NAME`, `NODE_CORS_ORIGINS`, …) |
-| `NEXT_PUBLIC_MAPBOX_TOKEN` | Web | Mapbox GL access token |
-| `NEXT_PUBLIC_MAPBOX_STYLE_URL` | Web | Optional custom style (prefer `mapbox://styles/USER/STYLE_ID` from Studio). Full `https://api.mapbox.com/styles/v1/...` URLs are normalized to `mapbox://`. If Mapbox returns **404**, the username/style id is wrong, the style was deleted, or your **token is not from the Mapbox account that owns** that style. |
-| `NEXT_PUBLIC_MAPBOX_GLOBE` | Web | Optional: `1` = force globe, `0` = force flat map. Auto: globe only for core `mapbox://styles/mapbox/…` styles without a custom style URL. |
+| `NEXT_PUBLIC_EARTH_ALBEDO_URL` | Web | Optional equirectangular Earth texture (HTTPS URL or same-origin path like `/earth.jpg` in `public/`). If unset, a dark fallback material is used. |
 | `NEXT_PUBLIC_API_BASE_URL` | Web | Python API base URL (defaults to `http://127.0.0.1:8000`) |
 
 ## License

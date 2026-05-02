@@ -37,3 +37,6 @@ out/
 
 # Misc
 *.log
+
+# Images
+*.png
