@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { Orbit } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -20,12 +19,8 @@ export function TopBar() {
   return (
     <header className="flex h-12 items-center gap-3 border-b border-border bg-background/80 px-4 backdrop-blur">
       <div className="flex items-center gap-2">
-        <div className="flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card">
-          <Orbit className="h-4 w-4 text-foreground" />
-        </div>
         <div className="leading-tight">
-          <div className="text-sm font-semibold tracking-tight">node</div>
-          <div className="text-[11px] text-muted-foreground">constellation ops</div>
+          <div className="text-md font-semibold tracking-tight italic">node.</div>
         </div>
       </div>
 

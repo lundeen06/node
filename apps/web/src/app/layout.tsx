@@ -7,7 +7,7 @@ const sans = Inter({ subsets: ["latin"], variable: "--font-geist-sans" });
 const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-geist-mono" });
 
 export const metadata: Metadata = {
-  title: "node · constellation ops",
+  title: "node",
   description: "Cursor for satellite operators — situational awareness and maneuver planning (demo shell).",
 };
 
