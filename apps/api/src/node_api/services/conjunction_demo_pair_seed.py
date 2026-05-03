@@ -22,11 +22,11 @@ _SAT_B = "00-DEMO-CNJ-B"
 _NORAD_A = 98760
 _NORAD_B = 98761
 
-# Validated pair: screen_pair_sphere_sgp4 ~10.1 km miss, 12 km sphere, sim 2026-05-02 12:00 UTC.
+# Demo pair: same circular orbit shape/state, different inclinations (45 deg vs 50 deg).
 _TLE_A1 = "1 98760U 26001A   26122.50000000  .00000000  00000-0  00000-0 0  9997"
-_TLE_A2 = "2 98760  28.0000   0.0000 0001000   0.0000 350.0000 15.22004329    09"
+_TLE_A2 = "2 98760  45.0000   0.0000 0000000   0.0000 350.0000 15.22004329    09"
 _TLE_B1 = "1 98761U 26001B   26122.50000000  .00000000  00000-0  00000-0 0  9998"
-_TLE_B2 = "2 98761  85.0000  40.0000 0001000   0.0000 330.0000 15.22104329    06"
+_TLE_B2 = "2 98761  50.0000   0.0000 0000000   0.0000 350.0000 15.22004329    06"
 
 _EPOCH = datetime(2026, 5, 2, 12, 0, 0, tzinfo=UTC)
 _MU_M3S2 = 398600441800000.0
@@ -48,9 +48,9 @@ def _gp_stub(*, name: str, norad: int) -> dict[str, Any]:
 def _rows() -> tuple[SpacecraftRow, SpacecraftRow]:
     now = datetime.now(tz=UTC)
     a_a = _semi_major_m_from_mean_motion_rev_day(15.22004329)
-    a_b = _semi_major_m_from_mean_motion_rev_day(15.22104329)
-    oe_a = [a_a, 1e-4, math.radians(28.0), 0.0, 0.0, math.radians(350.0)]
-    oe_b = [a_b, 1e-4, math.radians(85.0), math.radians(40.0), 0.0, math.radians(330.0)]
+    a_b = _semi_major_m_from_mean_motion_rev_day(15.22004329)
+    oe_a = [a_a, 0.0, math.radians(45.0), 0.0, 0.0, math.radians(350.0)]
+    oe_b = [a_b, 0.0, math.radians(50.0), 0.0, 0.0, math.radians(350.0)]
     row_a = SpacecraftRow(
         sat_id=_SAT_A,
         name="Demo conjunction A (low incl.)",

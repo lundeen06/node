@@ -38,6 +38,7 @@ def _scan_pair_min_distance_km(
     num_orbits: float,
     step_s: float,
     sphere_km: float,
+    inc_ego_rad: float = 0.0,
     inc_ext_rad: float = 0.0,
 ) -> tuple[bool, float, int, int, float]:
     """Return (conjunction_occurred, min_distance_km, samples_inside, total_samples, duration_s)."""
@@ -49,7 +50,7 @@ def _scan_pair_min_distance_km(
     duration_s = num_orbits * T
 
     # Ego equatorial; external matches Ω, ω, M₀ and e, a — only inclination may differ.
-    oe_ego = np.array([a0_m, ecc, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    oe_ego = np.array([a0_m, ecc, inc_ego_rad, 0.0, 0.0, 0.0], dtype=np.float64)
     oe_ext = np.array([a1_m, ecc, inc_ext_rad, 0.0, 0.0, 0.0], dtype=np.float64)
 
     min_d = float("inf")
@@ -117,3 +118,32 @@ def test_equatorial_pair_five_orbits_keep_out_1km(
         assert min_d <= 1.0
     else:
         assert min_d > 1.0
+
+
+def test_same_a_same_true_anomaly_different_inclinations() -> None:
+    """Circular pair with same a and anomaly (i=45/50 deg) should register conjunction."""
+    a_km = 7000.0
+    conj, min_d, n_in, n_tot, dur = _scan_pair_min_distance_km(
+        a_km,
+        a_km,
+        ecc=0.0,
+        num_orbits=5.0,
+        step_s=30.0,
+        sphere_km=1.0,
+        inc_ego_rad=math.radians(45.0),
+        inc_ext_rad=math.radians(50.0),
+    )
+
+    print()
+    print("=== Same-a circular pair (45/50 deg inclination) ===")
+    print(f"  both a = {a_km} km, e = 0, M0 = 0")
+    print("  ego i = 45 deg | other i = 50 deg")
+    print(f"  window = 5 × ego period ≈ {dur:.1f} s")
+    print(f"  samples: {n_tot}, step = 30 s")
+    print(f"  minimum range = {min_d:.9f} km")
+    print(f"  samples inside sphere = {n_in}")
+    print(f"  conjunction_occurred = {conj}")
+
+    assert conj is True
+    assert n_in > 0
+    assert min_d <= 1e-6
