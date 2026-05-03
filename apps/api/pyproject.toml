@@ -11,6 +11,9 @@ dependencies = [
     "pydantic-settings>=2.2",
     "numpy>=1.26",
     "openai>=1.30",
+    "httpx>=0.28.1",
+    "sqlalchemy>=2.0",
+    "sgp4>=2.25",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +38,9 @@ src = ["src"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+"src/node_api/routes/**/*.py" = ["B008"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
@@ -51,4 +57,16 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "openai.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sqlalchemy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sgp4.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "physics.*"
 ignore_missing_imports = true

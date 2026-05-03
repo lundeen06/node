@@ -1,8 +1,6 @@
 import * as THREE from "three";
 
-import type { ECEF } from "./ecef";
-
-import { EARTH_RADIUS_M } from "./satellite-propagation";
+import { EARTH_RADIUS_M, type ECEF } from "./ecef";
 
 /** Scene scale: 1 unit = 1,000 km (keeps Earth ~6.4 units radius, stable for float32). */
 export const METERS_PER_SCENE_UNIT = 1_000_000;

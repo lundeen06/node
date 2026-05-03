@@ -2,10 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { useOpsShell } from "@/components/shell/OpsShellContext";
+
 import { attachEarthGlobe } from "./earthGlobeRenderer";
 import { ConjunctionMarker } from "./ConjunctionMarker";
+import { SpacecraftGlobeLayers } from "./SpacecraftGlobeLayers";
 
 export function Globe() {
+  const { setGlobe, toggleSatSelection } = useOpsShell();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [glError, setGlError] = useState<string | null>(null);
 
@@ -17,22 +21,27 @@ export function Globe() {
     let handle: ReturnType<typeof attachEarthGlobe> | null = null;
 
     try {
-      handle = attachEarthGlobe(el);
+      handle = attachEarthGlobe(el, {
+        onFleetPick: (satId) => toggleSatSelection(satId),
+      });
+      setGlobe(handle);
     } catch (err) {
       console.error("[Globe] WebGL init failed:", err);
       setGlError(err instanceof Error ? err.message : "WebGL initialization failed");
     }
 
     return () => {
+      setGlobe(null);
       handle?.dispose();
     };
-  }, []);
+  }, [setGlobe, toggleSatSelection]);
 
   return (
     <div className="relative flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-border/70 bg-zinc-950">
       <div ref={containerRef} className="relative z-0 min-h-0 w-full flex-1" />
 
       <div className="pointer-events-none absolute inset-0 z-10">
+        <SpacecraftGlobeLayers />
         <ConjunctionMarker />
       </div>
 

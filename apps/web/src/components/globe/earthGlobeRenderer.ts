@@ -7,19 +7,32 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { SMAAPass } from "three/addons/postprocessing/SMAAPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 
-import { createEarthRimAtmosphere } from "./earthRimAtmosphere";
-import { ecefToGeodeticWgs84, type ECEF } from "@/lib/orbit/ecef";
+import { lonLatDegHeightToEcef } from "@/lib/orbit/ecef";
 import { EARTH_RADIUS_SCENE, ecefToSceneVector3 } from "@/lib/orbit/ecefThree";
-import { getSatelliteECEF, sampleOrbitPathECEF, SATELLITE_IDS } from "@/lib/orbit/satellite-propagation";
+import type { KeplerFleetEntry } from "@/lib/orbit/keplerFleet";
 
-const ORBIT_LINE_STEPS = 96;
-const ORBIT_DURATION_MS = 92 * 60 * 1000;
-const BASE_SAT_RADIUS_SCENE = 0.055;
-
-const SAT_LINE_COLORS = [0x66c2ff, 0xffb366, 0x8dff9f];
+import { createEarthRimAtmosphere } from "./earthRimAtmosphere";
 
 const STARFIELD_RADIUS = 220;
 const STAR_COUNT = 9000;
+
+/** Rough LEO altitude for lon/lat → ECEF when API gives only geographic coords (meters above ellipsoid). */
+const DEFAULT_LEO_ALT_M = 450_000;
+const MAX_FLEET_POINTS = 25_000;
+const MAX_TRACK_POINTS = 512;
+
+/** One sample of a satellite track, lon/lat in degrees. */
+export type GroundTrack = {
+  satId: string;
+  path: [number, number][];
+};
+
+/** Position of one selected satellite (lon/lat degrees). */
+export type SelectedMarker = {
+  satId: string;
+  lonDeg: number;
+  latDeg: number;
+};
 
 function createSpaceGradientBackdrop(): { mesh: THREE.Mesh; dispose: () => void } {
   const geometry = new THREE.SphereGeometry(420, 64, 64);
@@ -83,12 +96,6 @@ function containerDrawSize(container: HTMLElement): { w: number; h: number } {
   };
 }
 
-function satelliteRadiusScene(ecef: ECEF): number {
-  const { h } = ecefToGeodeticWgs84(ecef);
-  const altScale = 1 + Math.min(Math.max(0, h) / 4e6, 2.5) * 0.18;
-  return BASE_SAT_RADIUS_SCENE * altScale;
-}
-
 function createStarfieldGeometry(radius: number, count: number): THREE.BufferGeometry {
   const positions = new Float32Array(count * 3);
   const colors = new Float32Array(count * 3);
@@ -123,13 +130,42 @@ function disposeRoomEnvironmentScene(envScene: THREE.Scene): void {
   });
 }
 
-export type EarthGlobeHandle = { dispose: () => void };
+export type EarthGlobeOptions = {
+  /** Fires when the user clicks the fleet (short click, minimal drag). */
+  onFleetPick?: (satId: string) => void;
+};
+
+export type EarthGlobeHandle = {
+  dispose: () => void;
+  /**
+   * Update the plotted fleet from a list of {satId, lonDeg, latDeg}. Replaces all current points.
+   * Pass an empty array (or null) to clear.
+   */
+  setFleetPositions: (
+    items: { satId: string; lonDeg: number; latDeg: number }[] | null,
+  ) => void;
+  /** Multi-track ground paths — one Line per selected satellite. ``null`` clears all tracks. */
+  setGroundTracks: (tracks: GroundTrack[] | null) => void;
+  /** Multi-marker selection ring — one sphere per selected satellite. ``null`` clears all markers. */
+  setSelectedMarkers: (markers: SelectedMarker[] | null) => void;
+  /** Normalized device coords (-1..1) from canvas click → catalog ``sat_id``, or null. */
+  pickFleetSatId: (ndcX: number, ndcY: number) => string | null;
+};
+
+/** Pleasant amber→cyan rotation for selected ground tracks. */
+const TRACK_COLORS: number[] = [0xfbbf24, 0x60a5fa, 0xa78bfa, 0x34d399, 0xf472b6, 0xfb7185, 0x22d3ee];
+
+function trackColorFor(index: number): number {
+  return TRACK_COLORS[index % TRACK_COLORS.length]!;
+}
 
 /**
- * Earth + satellites: gradient sky sphere, **PMREM** (`RoomEnvironment`), **bloom** + SMAA + ACES
- * (`OutputPass`), physical materials, dense star shell, sun-aware Fresnel atmosphere.
+ * Earth + fleet (CPU-driven Points), multi-track support, selection markers.
+ * Uses ``PointsMaterial`` and ``LineBasicMaterial`` so they integrate with ``logarithmicDepthBuffer``
+ * automatically. Custom shader-based propagation was removed — propagation runs on the JS side and
+ * uploads positions each frame.
  */
-export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
+export function attachEarthGlobe(container: HTMLElement, options?: EarthGlobeOptions): EarthGlobeHandle {
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: false,
@@ -179,33 +215,23 @@ export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
     sizeAttenuation: true,
     vertexColors: true,
     transparent: true,
-    opacity: 0.16,
+    opacity: 0.92,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
   });
   const stars = new THREE.Points(starsGeo, starsMat);
-  stars.renderOrder = -1;
   scene.add(stars);
 
-  const earthGeom = new THREE.SphereGeometry(EARTH_RADIUS_SCENE, 144, 144);
+  const earthGeom = new THREE.SphereGeometry(EARTH_RADIUS_SCENE, 96, 96);
   const albedoUrl = getEarthAlbedoUrl();
   let earthMaterial: THREE.MeshPhysicalMaterial;
-  let earthTexture: THREE.Texture | null = null;
+  let earthTexture: THREE.Texture | undefined;
 
   if (albedoUrl) {
     earthMaterial = new THREE.MeshPhysicalMaterial({
       color: 0xffffff,
-      metalness: 0.05,
-      roughness: 0.62,
-      clearcoat: 0.12,
-      clearcoatRoughness: 0.32,
-      specularIntensity: 1.0,
-      specularColor: new THREE.Color(0xe8f4ff),
-      ior: 1.1,
-      envMapIntensity: 0.44,
-      sheen: 0.24,
-      sheenRoughness: 0.85,
-      sheenColor: new THREE.Color(0x88a8cc),
+      metalness: 0.03,
+      roughness: 0.78,
+      envMapIntensity: 0.35,
     });
     const loader = new THREE.TextureLoader();
     loader.load(
@@ -246,43 +272,208 @@ export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
   const rim = createEarthRimAtmosphere(EARTH_RADIUS_SCENE);
   scene.add(rim.mesh);
 
-  const satGeom = new THREE.SphereGeometry(1, 24, 24);
-  const satMat = new THREE.MeshPhysicalMaterial({
-    color: 0xf2f8ff,
-    metalness: 0.42,
-    roughness: 0.22,
-    clearcoat: 0.62,
-    clearcoatRoughness: 0.16,
-    emissive: 0x203858,
-    emissiveIntensity: 0.62,
-    envMapIntensity: 0.95,
-  });
-  const instanced = new THREE.InstancedMesh(satGeom, satMat, SATELLITE_IDS.length);
-  instanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  instanced.frustumCulled = false;
-  scene.add(instanced);
-
-  const orbitLines: THREE.Line[] = [];
+  /* Fleet points: built-in ``PointsMaterial`` so it inherits the renderer's logarithmic depth state. */
+  const fleetSatIds: string[] = [];
+  let fleetDrawCount = 0;
+  const raycaster = new THREE.Raycaster();
+  raycaster.params.Points = { threshold: 0.18 };
   const vScratch = new THREE.Vector3();
-  const dummy = new THREE.Object3D();
 
-  for (let i = 0; i < SATELLITE_IDS.length; i++) {
-    const g = new THREE.BufferGeometry();
-    const pos = new Float32Array(ORBIT_LINE_STEPS * 3);
-    g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    const line = new THREE.Line(
-      g,
-      new THREE.LineBasicMaterial({
-        color: SAT_LINE_COLORS[i % SAT_LINE_COLORS.length],
-        transparent: true,
-        opacity: 0.62,
-        depthWrite: false,
-      }),
-    );
+  const fleetPositions = new Float32Array(MAX_FLEET_POINTS * 3);
+  const fleetGeo = new THREE.BufferGeometry();
+  fleetGeo.setAttribute("position", new THREE.BufferAttribute(fleetPositions, 3));
+  fleetGeo.setDrawRange(0, 0);
+  const fleetMat = new THREE.PointsMaterial({
+    color: 0x38bdf8,
+    size: 0.055,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: true,
+  });
+  const fleetPoints = new THREE.Points(fleetGeo, fleetMat);
+  fleetPoints.frustumCulled = false;
+  fleetPoints.visible = false;
+  scene.add(fleetPoints);
+
+  const setFleetPositions = (
+    items: { satId: string; lonDeg: number; latDeg: number }[] | null,
+  ) => {
+    fleetSatIds.length = 0;
+    if (!items?.length) {
+      fleetDrawCount = 0;
+      fleetGeo.setDrawRange(0, 0);
+      fleetPoints.visible = false;
+      return;
+    }
+    const n = Math.min(items.length, MAX_FLEET_POINTS);
+    for (let i = 0; i < n; i++) {
+      const it = items[i]!;
+      fleetSatIds.push(it.satId);
+      const ecef = lonLatDegHeightToEcef(it.lonDeg, it.latDeg, DEFAULT_LEO_ALT_M);
+      ecefToSceneVector3(ecef, vScratch);
+      fleetPositions[i * 3] = vScratch.x;
+      fleetPositions[i * 3 + 1] = vScratch.y;
+      fleetPositions[i * 3 + 2] = vScratch.z;
+    }
+    fleetDrawCount = n;
+    const attr = fleetGeo.attributes.position as THREE.BufferAttribute;
+    attr.needsUpdate = true;
+    fleetGeo.setDrawRange(0, n);
+    fleetPoints.visible = true;
+  };
+
+  /* Ground tracks: pool of Line objects keyed by ``satId``. Up to MAX_TRACK_POINTS samples each. */
+  type TrackEntry = {
+    line: THREE.Line;
+    geo: THREE.BufferGeometry;
+    mat: THREE.LineBasicMaterial;
+    positions: Float32Array;
+  };
+  const trackPool = new Map<string, TrackEntry>();
+
+  const ensureTrackEntry = (satId: string, colorIndex: number): TrackEntry => {
+    const existing = trackPool.get(satId);
+    if (existing) {
+      existing.mat.color.setHex(trackColorFor(colorIndex));
+      return existing;
+    }
+    const positions = new Float32Array(MAX_TRACK_POINTS * 3);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.LineBasicMaterial({
+      color: trackColorFor(colorIndex),
+      transparent: true,
+      opacity: 0.92,
+      depthWrite: false,
+    });
+    const line = new THREE.Line(geo, mat);
     line.frustumCulled = false;
-    orbitLines.push(line);
+    line.renderOrder = 2;
     scene.add(line);
-  }
+    const entry: TrackEntry = { line, geo, mat, positions };
+    trackPool.set(satId, entry);
+    return entry;
+  };
+
+  const removeTrackEntry = (satId: string) => {
+    const e = trackPool.get(satId);
+    if (!e) return;
+    scene.remove(e.line);
+    e.geo.dispose();
+    e.mat.dispose();
+    trackPool.delete(satId);
+  };
+
+  const setGroundTracks = (tracks: GroundTrack[] | null) => {
+    const wanted = new Set<string>();
+    if (tracks?.length) {
+      tracks.forEach((t, i) => {
+        if (t.path.length < 2) return;
+        wanted.add(t.satId);
+        const entry = ensureTrackEntry(t.satId, i);
+        const n = Math.min(t.path.length, MAX_TRACK_POINTS);
+        for (let j = 0; j < n; j++) {
+          const [lonDeg, latDeg] = t.path[j]!;
+          const ecef = lonLatDegHeightToEcef(lonDeg, latDeg, DEFAULT_LEO_ALT_M);
+          ecefToSceneVector3(ecef, vScratch);
+          entry.positions[j * 3] = vScratch.x;
+          entry.positions[j * 3 + 1] = vScratch.y;
+          entry.positions[j * 3 + 2] = vScratch.z;
+        }
+        const attr = entry.geo.attributes.position as THREE.BufferAttribute;
+        attr.needsUpdate = true;
+        entry.geo.setDrawRange(0, n);
+        entry.line.visible = true;
+      });
+    }
+    for (const id of Array.from(trackPool.keys())) {
+      if (!wanted.has(id)) removeTrackEntry(id);
+    }
+  };
+
+  /* Selection markers: small glowing spheres ~120 km above ground track for each selected sat. */
+  type MarkerEntry = {
+    mesh: THREE.Mesh;
+    geo: THREE.SphereGeometry;
+    mat: THREE.MeshBasicMaterial;
+  };
+  const markerPool = new Map<string, MarkerEntry>();
+
+  const ensureMarkerEntry = (satId: string, colorIndex: number): MarkerEntry => {
+    const existing = markerPool.get(satId);
+    if (existing) {
+      existing.mat.color.setHex(trackColorFor(colorIndex));
+      return existing;
+    }
+    const geo = new THREE.SphereGeometry(0.12, 18, 18);
+    const mat = new THREE.MeshBasicMaterial({
+      color: trackColorFor(colorIndex),
+      transparent: true,
+      opacity: 0.95,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.renderOrder = 3;
+    scene.add(mesh);
+    const entry: MarkerEntry = { mesh, geo, mat };
+    markerPool.set(satId, entry);
+    return entry;
+  };
+
+  const removeMarkerEntry = (satId: string) => {
+    const e = markerPool.get(satId);
+    if (!e) return;
+    scene.remove(e.mesh);
+    e.geo.dispose();
+    e.mat.dispose();
+    markerPool.delete(satId);
+  };
+
+  const setSelectedMarkers = (markers: SelectedMarker[] | null) => {
+    const wanted = new Set<string>();
+    if (markers?.length) {
+      markers.forEach((m, i) => {
+        wanted.add(m.satId);
+        const entry = ensureMarkerEntry(m.satId, i);
+        const ecef = lonLatDegHeightToEcef(m.lonDeg, m.latDeg, DEFAULT_LEO_ALT_M + 120_000);
+        ecefToSceneVector3(ecef, vScratch);
+        entry.mesh.position.copy(vScratch);
+        entry.mesh.visible = true;
+      });
+    }
+    for (const id of Array.from(markerPool.keys())) {
+      if (!wanted.has(id)) removeMarkerEntry(id);
+    }
+  };
+
+  const pickFleetSatId = (ndcX: number, ndcY: number): string | null => {
+    if (!fleetPoints.visible) return null;
+    raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+    const hits = raycaster.intersectObject(fleetPoints, false);
+    const hi = hits[0];
+    if (!hi || hi.index == null) return null;
+    const idx = hi.index;
+    if (idx < 0 || idx >= fleetDrawCount) return null;
+    return fleetSatIds[idx] ?? null;
+  };
+
+  let pickDownX = 0;
+  let pickDownY = 0;
+  const onPickPointerDown = (ev: PointerEvent) => {
+    pickDownX = ev.clientX;
+    pickDownY = ev.clientY;
+  };
+  const onPickPointerUp = (ev: PointerEvent) => {
+    if (!options?.onFleetPick) return;
+    if (Math.hypot(ev.clientX - pickDownX, ev.clientY - pickDownY) > 6) return;
+    const rect = renderer.domElement.getBoundingClientRect();
+    const ndcX = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+    const id = pickFleetSatId(ndcX, ndcY);
+    if (id) options.onFleetPick(id);
+  };
+  renderer.domElement.addEventListener("pointerdown", onPickPointerDown);
+  renderer.domElement.addEventListener("pointerup", onPickPointerUp);
 
   const composer = new EffectComposer(renderer);
   const renderPass = new RenderPass(scene, camera);
@@ -308,43 +499,12 @@ export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
   };
   syncComposerSize();
 
-  const updateMeshes = (timeMs: number) => {
-    for (let i = 0; i < SATELLITE_IDS.length; i++) {
-      const id = SATELLITE_IDS[i]!;
-      const ecef = getSatelliteECEF(timeMs, id);
-      ecefToSceneVector3(ecef, vScratch);
-      const r = satelliteRadiusScene(ecef);
-      dummy.position.copy(vScratch);
-      dummy.scale.setScalar(r);
-      dummy.updateMatrix();
-      instanced.setMatrixAt(i, dummy.matrix);
-    }
-    instanced.instanceMatrix.needsUpdate = true;
-
-    for (let i = 0; i < orbitLines.length; i++) {
-      const id = SATELLITE_IDS[i]!;
-      const path = sampleOrbitPathECEF(timeMs, id, ORBIT_DURATION_MS, ORBIT_LINE_STEPS);
-      const line = orbitLines[i]!;
-      const attr = line.geometry.attributes.position as THREE.BufferAttribute;
-      const arr = attr.array as Float32Array;
-      for (let j = 0; j < path.length; j++) {
-        ecefToSceneVector3(path[j]!, vScratch);
-        arr[j * 3] = vScratch.x;
-        arr[j * 3 + 1] = vScratch.y;
-        arr[j * 3 + 2] = vScratch.z;
-      }
-      attr.needsUpdate = true;
-      line.geometry.setDrawRange(0, path.length);
-    }
-  };
-
   let rafId = 0;
   const tick = () => {
     rafId = requestAnimationFrame(tick);
     controls.update();
     rim.updateCameraUniform(camera);
     rim.updateSunDirection(sun.position);
-    updateMeshes(performance.now());
     composer.render();
   };
   rafId = requestAnimationFrame(tick);
@@ -356,6 +516,8 @@ export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
     dispose: () => {
       cancelAnimationFrame(rafId);
       ro.disconnect();
+      renderer.domElement.removeEventListener("pointerdown", onPickPointerDown);
+      renderer.domElement.removeEventListener("pointerup", onPickPointerUp);
       controls.dispose();
 
       outputPass.dispose();
@@ -369,12 +531,6 @@ export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
       envRT.dispose();
       scene.environment = null;
 
-      for (const line of orbitLines) {
-        line.geometry.dispose();
-        (line.material as THREE.Material).dispose();
-      }
-      orbitLines.length = 0;
-
       starsGeo.dispose();
       starsMat.dispose();
 
@@ -384,13 +540,35 @@ export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
       earthMaterial.dispose();
       earthTexture?.dispose();
 
-      satGeom.dispose();
-      satMat.dispose();
+      fleetGeo.dispose();
+      fleetMat.dispose();
+
+      for (const id of Array.from(trackPool.keys())) removeTrackEntry(id);
+      for (const id of Array.from(markerPool.keys())) removeMarkerEntry(id);
 
       renderer.dispose();
       if (renderer.domElement.parentElement === container) {
         container.removeChild(renderer.domElement);
       }
     },
+    setFleetPositions,
+    setGroundTracks,
+    setSelectedMarkers,
+    pickFleetSatId,
   };
+}
+
+/** Convert ``KeplerFleetEntry`` array → ``setFleetPositions`` payload using the JS Kepler propagator. */
+export function fleetItemsFromKepler(
+  entries: KeplerFleetEntry[],
+  whenUtc: Date,
+  propagateLonLat: (entry: KeplerFleetEntry, when: Date) => [number, number] | null,
+): { satId: string; lonDeg: number; latDeg: number }[] {
+  const out: { satId: string; lonDeg: number; latDeg: number }[] = [];
+  for (const e of entries) {
+    const ll = propagateLonLat(e, whenUtc);
+    if (!ll) continue;
+    out.push({ satId: e.sat_id, lonDeg: ll[0], latDeg: ll[1] });
+  }
+  return out;
 }

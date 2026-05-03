@@ -4,10 +4,35 @@
  */
 export type ECEF = { x: number; y: number; z: number };
 
+/** WGS84 semi-major axis (m); common shorthand “Earth radius” for visualization. */
+export const EARTH_RADIUS_M = 6378137.0;
+
+/** Geodetic radians + ellipsoidal height → ECEF (WGS84). */
+export function geodeticRadToEcef(lonRad: number, latRad: number, hM: number): ECEF {
+  const a = EARTH_RADIUS_M;
+  const f = 1 / 298.257223563;
+  const e2 = f * (2 - f);
+  const sinLat = Math.sin(latRad);
+  const cosLat = Math.cos(latRad);
+  const cosLon = Math.cos(lonRad);
+  const sinLon = Math.sin(lonRad);
+  const N = a / Math.sqrt(1 - e2 * sinLat * sinLat);
+  const x = (N + hM) * cosLat * cosLon;
+  const y = (N + hM) * cosLat * sinLon;
+  const z = (N * (1 - e2) + hM) * sinLat;
+  return { x, y, z };
+}
+
+/** Degrees on WGS84 ellipsoid → ECEF (height above ellipsoid, meters). */
+export function lonLatDegHeightToEcef(lonDeg: number, latDeg: number, hM: number): ECEF {
+  const r = Math.PI / 180;
+  return geodeticRadToEcef(lonDeg * r, latDeg * r, hM);
+}
+
 /** Bowring-style closed-form ECEF → geodetic (radians lat/lon, meters height). */
 export function ecefToGeodeticWgs84(e: ECEF): { lon: number; lat: number; h: number } {
   const { x, y, z } = e;
-  const a = 6378137.0;
+  const a = EARTH_RADIUS_M;
   const f = 1 / 298.257223563;
   const b = a * (1 - f);
   const e2 = f * (2 - f);

@@ -39,7 +39,7 @@ def test_import_lib_layers() -> None:
         propagation,
         validation,
     )
-    from node_api.lib.ingress import celestrak, eop, space_track, space_weather  # noqa: F401
+    from node_api.lib.ingress import celestrak, constellation_presets, eop, space_track, space_weather  # noqa: F401
     from node_api.lib.mission import (  # noqa: F401
         collision_avoidance,
         deorbit,
@@ -58,4 +58,8 @@ def test_import_lib_layers() -> None:
 
 
 def test_import_routes() -> None:
-    from node_api.routes import agent, conjunctions, maneuvers, satellites  # noqa: F401
+    from node_api.routes import agent, conjunctions, maneuvers, satellites, spacecraft  # noqa: F401
+
+
+def test_import_db() -> None:
+    from node_api.db import models, session  # noqa: F401
