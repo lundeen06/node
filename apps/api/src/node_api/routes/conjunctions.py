@@ -17,6 +17,7 @@ from node_api.lib.pair_conjunction_keplerian import (
 from node_api.db.session import get_session
 from node_api.lib.pair_conjunction_sgp4 import screen_pair_sphere_sgp4
 from node_api.services.catalog_conjunction_screen import screen_catalog_close_approaches
+from node_api.services.conjunction_demo_pair_seed import refresh_demo_pair_for_sim_utc
 from node_api.services.conjunction_store import replace_catalog_conjunction_snapshot
 from node_api.types.state import KeplerianElements
 from node_api.types.time import Epoch, TimeScale
@@ -44,7 +45,7 @@ class PairSphereScreenRequest(BaseModel):
     my_spacecraft: TleLines = Field(..., description="Ego satellite TLE (sphere centered here).")
     external_spacecraft: TleLines = Field(..., description="Secondary / threat object TLE.")
     start_utc: datetime = Field(..., description="Propagation start (timezone-aware).")
-    sphere_radius_km: float = Field(default=1.0, gt=0, description="Keep-out sphere radius (km).")
+    sphere_radius_km: float = Field(default=10.0, gt=0, description="Keep-out sphere radius (km).")
     step_s: float = Field(default=30.0, gt=0, description="Sample interval for both vehicles (s).")
     search_max_orbits: int = Field(
         default=30,
@@ -122,7 +123,7 @@ class CatalogScreenRequest(BaseModel):
     separation_prefilter_km: float = Field(default=4000.0, gt=0, le=50_000.0)
     max_satellites: int = Field(default=80, ge=2, le=500)
     max_candidate_pairs: int = Field(default=2500, ge=1, le=50_000)
-    sphere_radius_km: float = Field(default=15.0, gt=0, le=500.0)
+    sphere_radius_km: float = Field(default=10.0, gt=0, le=500.0)
     step_s: float = Field(default=90.0, gt=1, le=600.0)
     search_max_orbits: int = Field(default=2, ge=1, le=30)
     maneuver_preview_sat_id: str | None = Field(
@@ -192,6 +193,10 @@ def catalog_screen(
     if body.sim_utc.tzinfo is None:
         raise HTTPException(status_code=400, detail="sim_utc must be timezone-aware.")
     sim = body.sim_utc.astimezone(UTC)
+    # Keep the synthetic demo pair anchored near sim_utc so SGP4 J2 RAAN drift hasn't yet
+    # separated the 45/50 inclination planes by the time screening runs (the pair is
+    # otherwise temporally fragile; see conjunction_demo_pair_seed for details).
+    refresh_demo_pair_for_sim_utc(session, sim)
     maneuver_preview: tuple[str, list[tuple[datetime, np.ndarray]]] | None = None
     if body.maneuver_preview_sat_id and body.maneuver_preview_maneuvers:
         sid = body.maneuver_preview_sat_id.strip()

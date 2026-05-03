@@ -34,48 +34,22 @@ function isBurnPropagated(preview: ManeuverPreviewConfig | null): boolean {
   return preview != null && preview.burnApplied === true;
 }
 
-function conjunctionMarkersForSim(
-  hits: CatalogScreenEvent[],
-  now: Date,
-  entriesById: Map<string, KeplerFleetEntry>,
-  maneuverEciMeters: ((satId: string) => [number, number, number] | null) | null,
-): ConjunctionMarkerInput[] | null {
+/**
+ * Pin the red conjunction marker to the **server-side TCA intersection point** so it stays
+ * fixed in inertial space at the predicted collision center while the satellites approach
+ * it (and continue past it after a maneuver). ``eci_mid_m`` / ``primary_eci_m`` /
+ * ``secondary_eci_m`` are evaluated at TCA by ``screen_catalog_close_approaches`` and are
+ * the operationally meaningful "where would the collision happen" point — not a moving
+ * midpoint of the live propagated positions.
+ */
+function conjunctionMarkersForSim(hits: CatalogScreenEvent[]): ConjunctionMarkerInput[] | null {
   if (hits.length === 0) return null;
-  const out: ConjunctionMarkerInput[] = [];
-  for (const e of hits) {
-    const pEntry = entriesById.get(e.primary_sat_id);
-    const sEntry = entriesById.get(e.secondary_sat_id);
-    let pEci: [number, number, number] | null = null;
-    let sEci: [number, number, number] | null = null;
-    if (pEntry) {
-      const m = maneuverEciMeters?.(e.primary_sat_id);
-      const r = m ?? propagateKeplerEntryEciMeters(pEntry, now);
-      if (r) pEci = r;
-    }
-    if (sEntry) {
-      const m = maneuverEciMeters?.(e.secondary_sat_id);
-      const r = m ?? propagateKeplerEntryEciMeters(sEntry, now);
-      if (r) sEci = r;
-    }
-    if (!pEci && !sEci) {
-      out.push({
-        id: e.id,
-        eciM: e.eci_mid_m,
-        primaryEciM: e.primary_eci_m,
-        secondaryEciM: e.secondary_eci_m,
-      });
-      continue;
-    }
-    const pri = pEci ?? (e.primary_eci_m as [number, number, number]);
-    const sec = sEci ?? (e.secondary_eci_m as [number, number, number]);
-    const mid: [number, number, number] = [
-      (pri[0]! + sec[0]!) / 2,
-      (pri[1]! + sec[1]!) / 2,
-      (pri[2]! + sec[2]!) / 2,
-    ];
-    out.push({ id: e.id, eciM: mid, primaryEciM: pri, secondaryEciM: sec });
-  }
-  return out.length > 0 ? out : null;
+  return hits.map((e) => ({
+    id: e.id,
+    eciM: e.eci_mid_m,
+    primaryEciM: e.primary_eci_m,
+    secondaryEciM: e.secondary_eci_m,
+  }));
 }
 
 export function SpacecraftGlobeLayers() {
@@ -111,8 +85,8 @@ export function SpacecraftGlobeLayers() {
   const previewTrajectoryRef = useRef<{ satId: string; traj: TrajectoryResponse } | null>(null);
   /**
    * Proposal-phase only: post-burn-propagated trajectory used to render the green "if accepted"
-   * overlay path and the green sphere at TCA. Cleared when the burn is approved (the approved
-   * trajectory is owned by ``previewTrajectoryRef``).
+   * overlay path. Cleared when the burn is approved (the approved trajectory is owned by
+   * ``previewTrajectoryRef``).
    */
   const proposedTrajectoryRef = useRef<{ satId: string; traj: TrajectoryResponse } | null>(null);
   const lastGroundTracksRef = useRef<GroundTrack[] | null>(null);
@@ -163,16 +137,10 @@ export function SpacecraftGlobeLayers() {
       }
       globe.setFleetPositions(fleet.length > 0 ? fleet : null);
 
-      const maneuverEciMeters =
-        propagated && previewSatId && bundle
-          ? (satId: string) => (satId === previewSatId ? positionEciMetersFromTrajectoryAt(bundle.traj, now) : null)
-          : null;
-      const hitsForMarkers = [...conjunctionHitsRef.current];
-      const cj =
-        hitsForMarkers.length > 0
-          ? conjunctionMarkersForSim(hitsForMarkers, now, entriesByIdRef.current, maneuverEciMeters)
-          : null;
-      globe.setConjunctionMarkers(cj);
+      const hitsForMarkers = conjunctionHitsRef.current;
+      globe.setConjunctionMarkers(
+        hitsForMarkers.length > 0 ? conjunctionMarkersForSim(hitsForMarkers) : null,
+      );
 
       const snap = lastGroundTracksRef.current;
       const cfgLoop = maneuverPreviewRef.current;
@@ -221,7 +189,6 @@ export function SpacecraftGlobeLayers() {
     if (selectedSatIds.size === 0 && !maneuverPreviewConfig) {
       lastGroundTracksRef.current = null;
       globe.setGroundTracks(null);
-      globe.setProposedAfterBurnMarker(null);
       return;
     }
     let cancelled = false;
@@ -345,27 +312,6 @@ export function SpacecraftGlobeLayers() {
       if (!cancelled) {
         lastGroundTracksRef.current = tracks.length > 0 ? tracks : null;
         g.setGroundTracks(tracks.length > 0 ? tracks : null);
-
-        // Place / clear the green "post-burn at TCA" sphere.
-        const cfg = maneuverPreviewRef.current;
-        const proposed = proposedTrajectoryRef.current;
-        if (cfg && !cfg.burnApplied && proposed && proposed.satId === cfg.satId) {
-          const cid = selectedConjunctionIdRef.current;
-          const ev = cid ? conjunctionHitsRef.current.find((e) => e.id === cid) : undefined;
-          const tcaMs = ev ? Date.parse(ev.tca_utc) : NaN;
-          if (Number.isFinite(tcaMs)) {
-            const eciM = positionEciMetersFromTrajectoryAt(proposed.traj, new Date(tcaMs as number));
-            if (eciM) {
-              g.setProposedAfterBurnMarker({ satId: cfg.satId, eciM });
-            } else {
-              g.setProposedAfterBurnMarker(null);
-            }
-          } else {
-            g.setProposedAfterBurnMarker(null);
-          }
-        } else {
-          g.setProposedAfterBurnMarker(null);
-        }
       }
     }
 

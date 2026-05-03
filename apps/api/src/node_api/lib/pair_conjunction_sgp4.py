@@ -62,7 +62,7 @@ def screen_pair_sphere_sgp4(
     external_line2: str,
     start_utc: datetime,
     *,
-    sphere_radius_km: float = 1.0,
+    sphere_radius_km: float = 10.0,
     step_s: float = 30.0,
     search_max_orbits: int = 30,
     followup_orbits: int = 5,

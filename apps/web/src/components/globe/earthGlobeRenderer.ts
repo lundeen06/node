@@ -61,14 +61,6 @@ export type SelectedMarker = {
   eciM: [number, number, number];
 };
 
-/** Optional preview-only sphere (single mesh) for the post-burn position at TCA. */
-export type ProposedAfterBurnMarker = {
-  satId: string;
-  eciM: [number, number, number];
-  /** Mesh color (default 0x22c55e, green-500). */
-  colorHex?: number;
-};
-
 function createSpaceGradientBackdrop(): { mesh: THREE.Mesh; dispose: () => void } {
   const geometry = new THREE.SphereGeometry(420, 64, 64);
   const material = new THREE.ShaderMaterial({
@@ -187,8 +179,6 @@ export type EarthGlobeHandle = {
   setGroundTracks: (tracks: GroundTrack[] | null) => void;
   setSelectedMarkers: (markers: SelectedMarker[] | null) => void;
   setConjunctionMarkers: (items: ConjunctionMarkerInput[] | null) => void;
-  /** Single-mesh green sphere for proposed post-burn position at TCA (proposal phase only). */
-  setProposedAfterBurnMarker: (input: ProposedAfterBurnMarker | null) => void;
   pickFleetSatId: (ndcX: number, ndcY: number) => string | null;
   pickConjunctionId: (ndcX: number, ndcY: number) => string | null;
   /** Orbit camera follows this world point each frame until the user drags the view or track is cleared. */
@@ -656,47 +646,6 @@ export function attachEarthGlobe(container: HTMLElement, options?: EarthGlobeOpt
     markerPool.delete(satId);
   };
 
-  /** Proposed post-burn marker — single configurable-color sphere (proposal phase only). */
-  const PROPOSED_MARKER_DEFAULT_COLOR = 0x22c55e;
-  let proposedMarker: { mesh: THREE.Mesh; geo: THREE.SphereGeometry; mat: THREE.MeshBasicMaterial } | null = null;
-
-  const setProposedAfterBurnMarker = (input: ProposedAfterBurnMarker | null) => {
-    if (!input) {
-      if (proposedMarker) {
-        scene.remove(proposedMarker.mesh);
-        proposedMarker.geo.dispose();
-        proposedMarker.mat.dispose();
-        proposedMarker = null;
-      }
-      return;
-    }
-    if (!proposedMarker) {
-      const geo = new THREE.SphereGeometry(SELECTED_MARKER_RADIUS_SCENE, 28, 28);
-      const mat = new THREE.MeshBasicMaterial({
-        color: input.colorHex ?? PROPOSED_MARKER_DEFAULT_COLOR,
-        transparent: true,
-        opacity: 0.95,
-        depthWrite: false,
-        depthTest: true,
-      });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.userData = { satId: input.satId, role: "proposed_after_burn" };
-      mesh.renderOrder = 26;
-      scene.add(mesh);
-      proposedMarker = { mesh, geo, mat };
-    } else {
-      proposedMarker.mat.color.setHex(input.colorHex ?? PROPOSED_MARKER_DEFAULT_COLOR);
-      proposedMarker.mesh.userData = { satId: input.satId, role: "proposed_after_burn" };
-    }
-    eciMetersToSceneVector3(input.eciM, vScratch);
-    const L = vScratch.length();
-    if (L > 1e-6) {
-      vScratch.multiplyScalar((L + SELECTED_MARKER_RADIAL_BUMP_SCENE) / L);
-    }
-    proposedMarker.mesh.position.copy(vScratch);
-    proposedMarker.mesh.visible = true;
-  };
-
   const setSelectedMarkers = (markers: SelectedMarker[] | null) => {
     const wanted = new Set<string>();
     if (markers?.length) {
@@ -1027,7 +976,6 @@ export function attachEarthGlobe(container: HTMLElement, options?: EarthGlobeOpt
       for (const id of Array.from(burnPool.keys())) removeBurnArrow(id);
       for (const id of Array.from(trackPool.keys())) removeTrackEntry(id);
       for (const id of Array.from(markerPool.keys())) removeMarkerEntry(id);
-      setProposedAfterBurnMarker(null);
 
       renderer.dispose();
       if (renderer.domElement.parentElement === container) {
@@ -1038,7 +986,6 @@ export function attachEarthGlobe(container: HTMLElement, options?: EarthGlobeOpt
     setGroundTracks,
     setSelectedMarkers,
     setConjunctionMarkers,
-    setProposedAfterBurnMarker,
     pickFleetSatId,
     pickConjunctionId,
     setCameraTrack,

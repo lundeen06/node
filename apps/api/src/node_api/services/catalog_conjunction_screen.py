@@ -131,7 +131,7 @@ def screen_catalog_close_approaches(
     separation_prefilter_km: float = 4000.0,
     max_satellites: int = 100,
     max_candidate_pairs: int = 2500,
-    sphere_radius_km: float = 15.0,
+    sphere_radius_km: float = 10.0,
     step_s: float = 90.0,
     search_max_orbits: int = 2,
     followup_orbits: int = 2,
