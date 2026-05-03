@@ -71,7 +71,6 @@ export function TopBar() {
 
       <nav className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/20 p-0.5">
         {navPill("/ops", "Ops", pathname === "/ops" || pathname?.startsWith("/ops/"))}
-        {navPill("/planner/EO-12", "Planner", Boolean(pathname?.startsWith("/planner")))}
       </nav>
 
       <div className="ml-auto flex flex-wrap items-center justify-end gap-2 sm:gap-3">
