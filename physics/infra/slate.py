@@ -63,6 +63,7 @@ class SatelliteRecord:
     sat_id: str
     name: str = ""
     norad_catalog_id: int | None = None
+    purpose: str = ""
 
 
 @dataclass(frozen=True)
