@@ -203,18 +203,18 @@ def screen_catalog_close_approaches(
             pb = _position_km_m(b, tca)
             mid_km = (pa + pb) * 0.5
             eci_mid_m = (float(mid_km[0] * 1000.0), float(mid_km[1] * 1000.0), float(mid_km[2] * 1000.0))
+            primary_m = (float(pa[0] * 1000.0), float(pa[1] * 1000.0), float(pa[2] * 1000.0))
+            secondary_m = (float(pb[0] * 1000.0), float(pb[1] * 1000.0), float(pb[2] * 1000.0))
         except Exception:
-            eci_mid_m = (0.0, 0.0, 0.0)
+            continue
 
         eid = stable_catalog_conjunction_event_id(a.sat_id, b.sat_id, tca)
-        primary_m = (float(pa[0] * 1000.0), float(pa[1] * 1000.0), float(pa[2] * 1000.0))
-        secondary_m = (float(pb[0] * 1000.0), float(pb[1] * 1000.0), float(pb[2] * 1000.0))
         events.append(
             {
                 "id": eid,
                 "primary_sat_id": a.sat_id,
                 "secondary_sat_id": b.sat_id,
-                "tca_utc": tca.isoformat(),
+                "tca_utc": tca.isoformat().replace("+00:00", "Z"),
                 "miss_distance_km": r.closest_approach_km,
                 "pc_heuristic": r.probability_heuristic,
                 "sphere_radius_km": sphere_radius_km,
