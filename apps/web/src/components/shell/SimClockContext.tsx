@@ -24,7 +24,7 @@ export type SimClockValue = {
 
 const SimClockContext = createContext<SimClockValue | null>(null);
 
-const DEFAULT_SCALE = 120;
+const DEFAULT_SCALE = 1;
 
 export function SimClockProvider({ children }: { children: ReactNode }) {
   const simOffsetMs = useRef(0);
