@@ -9,12 +9,14 @@ from numpy.typing import NDArray
 
 from node_api.errors import InfeasibleProblemError
 from node_api.lib.solvers.lambert import solve_lambert_problem
+from node_api.lib.tle_physics import trajectory_states_sgp4
 from node_api.physics_runtime import ensure_physics_importable
 from node_api.types.common import Vector3
 from node_api.types.conjunction import CloseApproach
 from node_api.types.constellation import HouseRules
 from node_api.types.maneuver import ManeuverPlan, PlanOrigin, ValidationOutcome
 from node_api.types.satellite import SatelliteState
+from node_api.types.state import StateVector
 from node_api.types.time import Epoch, TimeScale
 
 ensure_physics_importable()
@@ -61,6 +63,23 @@ def _arrival_position_km_out_of_plane(
     return r + u * step
 
 
+def _departure_state_at_burn(
+    ego: SatelliteState,
+    maneuver_epoch: Epoch,
+    line1: str,
+    line2: str,
+) -> StateVector:
+    """PV at the burn epoch from SGP4 (catalog TLE); frame matches ``ego``."""
+    t = maneuver_epoch.as_utc_datetime().astimezone(UTC)
+    _tt, r_km, v_km_s = trajectory_states_sgp4(line1, line2, [t])[0]
+    return StateVector(
+        position_km=Vector3(data=np.asarray(r_km, dtype=np.float64)),
+        velocity_km_s=Vector3(data=np.asarray(v_km_s, dtype=np.float64)),
+        epoch=maneuver_epoch,
+        frame=ego.state_vector.frame,
+    )
+
+
 def _solve_impulsive_avoidance_with_lead(
     ego: SatelliteState,
     threat: CloseApproach,
@@ -69,6 +88,8 @@ def _solve_impulsive_avoidance_with_lead(
     *,
     burn_lead_s: float,
     extra_separation_km: float,
+    tle_line1: str | None = None,
+    tle_line2: str | None = None,
 ) -> ManeuverPlan:
     if max_delta_v_mps <= 0:
         msg = "max_delta_v_mps must be positive."
@@ -85,7 +106,10 @@ def _solve_impulsive_avoidance_with_lead(
     maneuver_epoch = Epoch(instant=dep_instant.astimezone(UTC), scale=TimeScale.UTC)
     arrival_epoch = threat.tca
 
-    departure = ego.state_vector.model_copy(update={"epoch": maneuver_epoch})
+    if tle_line1 and tle_line2:
+        departure = _departure_state_at_burn(ego, maneuver_epoch, tle_line1, tle_line2)
+    else:
+        departure = ego.state_vector.model_copy(update={"epoch": maneuver_epoch})
     r0 = np.asarray(departure.position_km.data, dtype=np.float64).reshape(3)
     v0 = np.asarray(departure.velocity_km_s.data, dtype=np.float64).reshape(3)
 
@@ -146,6 +170,8 @@ def solve_impulsive_avoidance(
     *,
     burn_lead_s: float = 600.0,
     extra_separation_km: float = 40.0,
+    tle_line1: str | None = None,
+    tle_line2: str | None = None,
 ) -> ManeuverPlan:
     """Lambert single-impulse leg from a pre-TCA burn to an out-of-plane miss at TCA.
 
@@ -161,6 +187,8 @@ def solve_impulsive_avoidance(
         pc_target,
         burn_lead_s=burn_lead_s,
         extra_separation_km=extra_separation_km,
+        tle_line1=tle_line1,
+        tle_line2=tle_line2,
     )
 
 
@@ -168,6 +196,9 @@ def solve_optimal_avoidance_timing(
     ego: SatelliteState,
     threat: CloseApproach,
     house_rules: HouseRules,
+    *,
+    tle_line1: str | None = None,
+    tle_line2: str | None = None,
 ) -> ManeuverPlan:
     """Try several pre-TCA burn leads; return the feasible plan with lowest total Δv."""
     leads = (300.0, 600.0, 1200.0, 2400.0, 4800.0)
@@ -182,6 +213,8 @@ def solve_optimal_avoidance_timing(
                 house_rules.pc_mitigation_threshold,
                 burn_lead_s=lead,
                 extra_separation_km=40.0,
+                tle_line1=tle_line1,
+                tle_line2=tle_line2,
             )
         except InfeasibleProblemError as exc:
             last_err = exc

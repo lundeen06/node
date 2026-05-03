@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 
 import numpy as np
@@ -38,6 +39,16 @@ def sgp4_position_eci_m(line1: str, line2: str, when_utc: datetime) -> np.ndarra
         msg = f"SGP4 propagation failed (error code {err})."
         raise DataUnavailableError(msg)
     return np.asarray(r_km, dtype=np.float64) * 1000.0
+
+
+def tle_orbital_period_kozai_s(line1: str, line2: str) -> float:
+    """Sidereal period from SGP4 Kozai mean motion (rad/min), seconds."""
+    sat = Satrec.twoline2rv(line1, line2, WGS72)
+    nm = float(sat.no_kozai)
+    if nm <= 0:
+        msg = "TLE has invalid mean motion (no_kozai <= 0)."
+        raise DataUnavailableError(msg)
+    return 2.0 * math.pi * 60.0 / nm
 
 
 def trajectory_states_sgp4(

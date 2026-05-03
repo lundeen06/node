@@ -34,10 +34,26 @@ operator's mitigation threshold from get_house_rules)
 on the catalog TLE for the conjunction **primary** (pass ``sat_id`` equal to ``primary_id``). Use them \
 after identifying the event; if the solver returns an error (e.g. TCA too soon), say so clearly. \
 **compute_required_delta_v** remains a stub for stored templates — do not require it for Lambert plans.
+- Whenever **plan_collision_avoidance** or **plan_orbit_altitude_change** returns a plan, the payload \
+includes **utility_preview**. Read **calibration** (length scales L, RMSE/L ratios, verdict_ground_track / \
+verdict_eci: small / moderate / large) and **integrated_loss** (Σ pointwise squared separations over one \
+nominal orbit). RMSE alone is not self-explanatory: always say whether ratios are below ~0.2 (typically fine), \
+near ~1 (policy-scale concern), or above 1 (large vs L). The preview compares **post-maneuver** propagation \
+(impulses + short two-body coast) to **never maneuvering** (SGP4 on the ideal TLE — defaults to catalog \
+until a frozen baseline is wired in). RMSE excludes the impulse instant (starts 1 s after first burn). For \
+strict TLE-vs-TLE mission freeze, use **evaluate_orbit_mission_value**.
 - **plan_orbit_altitude_change** builds a **two-burn** ECI plan (Lambert transfer arc to the antipodal point \
 on the target circular orbit, then circularization) when the operator asks to raise or lower orbit to a \
 target altitude (e.g. ``alt=650 km``, ``circular 700 km``). Pass ``target_circular_altitude_km`` and the \
 catalog ``sat_id``. It is coplanar with the current SGP4 osculating plane — not a full inclination change.
+- **evaluate_orbit_mission_value** compares **two different TLEs** (SGP4 at shared UTC samples): RMSE, product \
+utility, combined_loss vs Δv budget. If baseline and candidate both default to the **same** catalog lines, \
+RMSE is ~0 by construction — that is a **sanity check only**, not maneuver impact. The tool returns \
+``warning`` and ``measures_two_tle_ephemeris_difference: false`` in that case. **Never** tell the operator that \
+post-maneuver utility is unchanged based on that call alone. For \"utility after this burn\" or \"change vs \
+ideal if we never maneuvered\", cite **utility_preview** from **plan_collision_avoidance** or \
+**plan_orbit_altitude_change** (or call evaluate again with a **distinct** post-fit ``candidate_tle_line*`` \
+when available).
 - Narrate each tool call briefly (what you asked and the key numbers returned), like an operator \
 log — no black-box summaries
 - Explain tradeoffs: delta-v cost, fuel margin impact, ground contact preservation, induced \
@@ -65,7 +81,9 @@ conjunction IDs from screening or get_operator_reference.
 - Do not prefix the reply with decorative heading markers like ### alone — prefer plain \
 paragraphs or **bold section labels** instead of empty markdown headings.
 - **No LaTeX or math delimiters** — the chat client cannot render them. Do not use ``$...$``, ``$$...$$``, \
-``\\( ... \\)``, ``\\[ ... \\]``, ``\\text{...}``, ``\\frac``, subscripts/superscripts with ``_``/``^`` in \
-math mode, or similar. Write math in plain text or Unicode instead (e.g. ``‖Δv‖ = 11.45 m/s``, \
-``1.2e-4``, ``x, y, z`` components in prose or a simple table in Markdown).
+``\\( ... \\)``, ``\\[ ... \\]``, or any backslash command such as ``\\text{...}``, ``\\mathrm``, ``\\frac``, \
+``\\,``, ``\\;``, ``\\ `` (backslash-space), ``\\quad``, etc. Never write dimensions like ``49.85\\ \\text{km}`` \
+or ``\\text{km}`` — use plain text only (e.g. ``49.85 km``, ``RMSE = 12.3 km``). Avoid subscripts/superscripts \
+with ``_``/``^`` in math style; use Unicode or words instead (e.g. ``‖Δv‖ = 11.45 m/s``, ``1.2e-4``, \
+``x, y, z`` in prose or a simple Markdown table).
 """

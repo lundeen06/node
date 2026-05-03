@@ -143,7 +143,10 @@ AGENT_TOOLS: list[dict[str, object]] = [
         "description": (
             "Build a Lambert single-impulse avoidance plan from the catalog TLE and a persisted "
             "catalog-screen conjunction (sat_id must be the event primary). Returns maneuvers with "
-            "epoch_utc, delta_v_mps (ECI m/s), frame, and validation entries for the UI."
+            "epoch_utc, delta_v_mps (ECI m/s), frame, and validation entries for the UI. Also returns "
+            "utility_preview: post-maneuver path vs catalog SGP4 if you never burn (one Kozai period from "
+            "first burn), integrated_loss, calibration (RMSE/L, verdicts), product utility, combined_loss vs "
+            "max_auto_delta_v_mps — interpret using calibration."
         ),
         "input_schema": {
             "type": "object",
@@ -170,13 +173,53 @@ AGENT_TOOLS: list[dict[str, object]] = [
         },
     },
     {
+        "name": "evaluate_orbit_mission_value",
+        "description": (
+            "Compare **two TLEs** with SGP4 on the same UTC grid: ground-track RMSE (km) and ECI RMSE (km), "
+            "utilities, combined_loss vs Δv budget. **Do not** use this with default catalog-only lines to "
+            "answer \"utility after a maneuver\" — identical TLEs ⇒ ~0 RMSE (sanity only); response includes "
+            "warning + measures_two_tle_ephemeris_difference=false. Post-burn vs ideal/no-burn catalog is "
+            "**utility_preview** on plan_collision_avoidance / plan_orbit_altitude_change. Pass distinct "
+            "baseline_tle_line* / candidate_tle_line* for refit or mission-freeze vs candidate ephemeris."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sat_id": {"type": "string", "description": "Catalog sat_id (see get_operator_reference)"},
+                "baseline_tle_line1": {"type": "string", "description": "Optional NORAD line 1; with line 2 freezes reference"},
+                "baseline_tle_line2": {"type": "string"},
+                "candidate_tle_line1": {"type": "string", "description": "Optional line 1 for perturbed / post-burn mean state"},
+                "candidate_tle_line2": {"type": "string"},
+                "t0_utc": {"type": "string", "description": "ISO-8601 UTC window start (optional)"},
+                "t1_utc": {"type": "string", "description": "ISO-8601 UTC window end (optional)"},
+                "n_samples": {
+                    "type": "integer",
+                    "description": "Time samples in [t0,t1], clamped 2–200 (default 48)",
+                },
+                "delta_v_used_mps": {"type": "number", "description": "Propellant already spent this campaign (default 0)"},
+                "delta_v_budget_mps": {
+                    "type": "number",
+                    "description": "Scalar budget m/s (default: constellation max_auto_delta_v_mps)",
+                },
+                "length_scale_track_km": {"type": "number", "description": "Ground-track exp kernel L, km (default 25)"},
+                "length_scale_eci_km": {"type": "number", "description": "ECI tube exp kernel L, km (default 5)"},
+                "w_track": {"type": "number", "description": "Weight on ground-track −log utility (default 1)"},
+                "w_eci": {"type": "number", "description": "Weight on ECI −log utility (default 1)"},
+                "w_fuel": {"type": "number", "description": "Weight on normalized fuel overrun² (default 1)"},
+            },
+            "required": ["sat_id"],
+        },
+    },
+    {
         "name": "plan_orbit_altitude_change",
         "description": (
             "Plan a **two-burn** coplanar transfer to a **circular** target orbit using a **Lambert** "
             "leg (half-period transfer ellipse) plus a circularization burn. Uses the catalog TLE and "
             "SGP4 state at ``reference_utc`` (or server UTC now). ``target_circular_altitude_km`` is "
             "altitude above the mean Earth sphere (same R_E as physics util_dyn). Example: operator says "
-            "raise orbit to 650 km → pass target_circular_altitude_km=650 and the catalog sat_id."
+            "raise orbit to 650 km → pass target_circular_altitude_km=650 and the catalog sat_id. Response "
+            "includes utility_preview (post-burn vs no-burn catalog SGP4 over one orbit, integrated squared loss, "
+            "calibration ratios vs L, verdicts, utility vs Δv budget) — cite calibration when discussing orbit cost."
         ),
         "input_schema": {
             "type": "object",
