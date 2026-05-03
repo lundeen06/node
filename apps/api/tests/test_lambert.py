@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
+from node_api.lib.solvers.hohmann import solve_hohmann_transfer
 from node_api.lib.solvers.lambert import (
     _lambert_vallado,
     delta_v_between_keplerian_orbits,
@@ -69,14 +70,13 @@ def test_solve_lambert_problem_intercept() -> None:
 
 
 def test_equatorial_circular_7000_to_8000_km() -> None:
-    """Simple smoke test: coplanar circular raise a=7000 km → a=8000 km (equatorial)."""
+    """Coplanar circular raise a=7000 km → a=8000 km: Hohmann vs Lambert (optimal geometry)."""
     from physics.propulsion import util_dyn
 
     mu = util_dyn.mu_E
     e_circ = 1e-8
     inc = 0.0
     t0 = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
-    t1 = t0 + timedelta(seconds=3600)
 
     dep = KeplerianElements(
         semi_major_axis_km=7000.0,
@@ -86,29 +86,53 @@ def test_equatorial_circular_7000_to_8000_km() -> None:
         arg_perigee_rad=0.0,
         true_anomaly_rad=0.0,
     )
-    # Different phase so initial/final radii are not collinear (Lambert needs a plane).
     arr = KeplerianElements(
         semi_major_axis_km=8000.0,
         eccentricity=e_circ,
         inclination_rad=inc,
         raan_rad=0.0,
         arg_perigee_rad=0.0,
-        true_anomaly_rad=float(np.pi / 2),
+        true_anomaly_rad=float(np.pi),
     )
 
-    plan = delta_v_between_keplerian_orbits(
+    h_plan = solve_hohmann_transfer(
+        dep,
+        8000.0,
+        sat_id="EQ-HOHMANN",
+        mu_m3_s2=mu,
+        departure_instant_utc=t0,
+    )
+    tof_s = h_plan.time_of_flight_s
+    assert tof_s is not None
+    t1 = t0 + timedelta(seconds=float(tof_s))
+
+    l_plan = delta_v_between_keplerian_orbits(
         dep,
         arr,
         _epoch(t0),
         _epoch(t1),
-        "EQ-RAISE",
+        "EQ-LAMBERT",
         mu_m3_s2=mu,
         prograde=True,
     )
 
-    assert len(plan.maneuvers) == 2
-    assert plan.total_delta_v_mps > 0.0
-    assert plan.total_delta_v_mps < 15_000.0  # sanity (LEO-scale transfer, not escape)
+    print("\n--- Hohmann (optimal two-impulse coplanar) ---")
+    print("  total_delta_v_mps:", h_plan.total_delta_v_mps)
+    print("  time_of_flight_s:", h_plan.time_of_flight_s)
+    print("  burn1 |dv|:", float(np.linalg.norm(h_plan.maneuvers[0].delta_v.data)))
+    print("  burn2 |dv|:", float(np.linalg.norm(h_plan.maneuvers[1].delta_v.data)))
+
+    print("\n--- Lambert (same endpoints & TOF as Hohmann) ---")
+    print("  total_delta_v_mps:", l_plan.total_delta_v_mps)
+    print("  time_of_flight_s:", l_plan.time_of_flight_s)
+    print("  burn1 |dv|:", float(np.linalg.norm(l_plan.maneuvers[0].delta_v.data)))
+    print("  burn2 |dv|:", float(np.linalg.norm(l_plan.maneuvers[1].delta_v.data)))
+
+    assert len(h_plan.maneuvers) == 2
+    assert len(l_plan.maneuvers) == 2
+    assert h_plan.total_delta_v_mps > 0.0
+    assert h_plan.total_delta_v_mps < 15_000.0
+    assert l_plan.total_delta_v_mps == pytest.approx(h_plan.total_delta_v_mps, rel=1e-4, abs=0.05)
 
 
 def test_delta_v_same_orbit_consistent_phasing_small_dv() -> None:

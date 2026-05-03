@@ -32,7 +32,6 @@ def test_import_types_submodules() -> None:
 def test_import_lib_layers() -> None:
     from node_api.lib import (  # noqa: F401
         actions,
-        conjunction,
         constellation,
         environment,
         frames,
