@@ -26,7 +26,9 @@ class Settings(BaseSettings):
             "http://localhost:3000,http://127.0.0.1:3000,"
             "http://localhost:3001,http://127.0.0.1:3001"
         ),
-        description="Comma-separated list of allowed CORS origins (include extra ports if Next picks them).",
+        description=(
+            "Comma-separated CORS origins. localhost vs 127.0.0.1 differ; include :3001 if Next uses it."
+        ),
     )
     openai_api_key: str = Field(
         default="",

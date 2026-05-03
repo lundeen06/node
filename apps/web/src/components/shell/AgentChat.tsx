@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { postAgentTurn } from "@/lib/api";
+import { ApiError, getApiBaseUrl, postAgentTurn } from "@/lib/api";
 import type { AgentTurnResponse, ChatMessage, PlanResponse } from "@/lib/types";
 import { useOpsShell } from "@/components/shell/OpsShellContext";
 import { useSimClock } from "@/components/shell/SimClockContext";
@@ -727,7 +727,19 @@ export function AgentChat() {
         setTypingVisible("");
         setAgentPhase("typing");
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Unknown error";
+        const base = getApiBaseUrl();
+        let msg =
+          err instanceof ApiError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : "Unknown error";
+        if (
+          err instanceof TypeError ||
+          (typeof msg === "string" && /failed to fetch/i.test(msg))
+        ) {
+          msg = `Cannot reach the API at ${base}. Start uvicorn in apps/api (port 8000) and set NEXT_PUBLIC_API_BASE_URL in apps/web/.env.local if needed.`;
+        }
         setMessages((prev) => [...prev, { role: "assistant", content: `[Error contacting agent: ${msg}]` }]);
         pendingPlansRef.current = null;
         setAgentPhase("idle");

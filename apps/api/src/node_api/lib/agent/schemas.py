@@ -1,8 +1,12 @@
-"""Anthropic Messages API tool definitions (name + description + input_schema)."""
+"""Function-calling tool definitions for the OpenAI Chat Completions API.
+
+Each entry in ``_AGENT_TOOL_SPECS`` uses ``input_schema``. :data:`OPENAI_CHAT_TOOLS` is the
+wire format (``type: "function"`` and ``parameters``).
+"""
 
 from __future__ import annotations
 
-AGENT_TOOLS: list[dict[str, object]] = [
+_AGENT_TOOL_SPECS: list[dict[str, object]] = [
     {
         "name": "get_operator_reference",
         "description": (
@@ -202,11 +206,11 @@ AGENT_TOOLS: list[dict[str, object]] = [
     },
 ]
 
-
 def openai_chat_tools() -> list[dict[str, object]]:
-    """Map ``AGENT_TOOLS`` to OpenAI Chat Completions ``tools`` format."""
+    """Map ``_AGENT_TOOL_SPECS`` to OpenAI Chat Completions ``tools`` format."""
+
     out: list[dict[str, object]] = []
-    for t in AGENT_TOOLS:
+    for t in _AGENT_TOOL_SPECS:
         out.append(
             {
                 "type": "function",
