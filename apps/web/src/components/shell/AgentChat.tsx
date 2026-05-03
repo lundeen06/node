@@ -1,7 +1,6 @@
 "use client";
 
-import { History, Loader2, MessageSquarePlus, ShieldCheck } from "lucide-react";
-import Link from "next/link";
+import { Ban, CheckCircle2, History, Loader2, MessageSquarePlus } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -20,9 +19,12 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { postAgentTurn } from "@/lib/api";
 import type { AgentTurnResponse, ChatMessage, PlanResponse } from "@/lib/types";
+import { useOpsShell } from "@/components/shell/OpsShellContext";
+import { useSimClock } from "@/components/shell/SimClockContext";
+import { computeManeuverTimelineWindowMs } from "@/lib/orbit/maneuverTimeline";
+import { formatBurnUtcReadable, formatTMinusSim } from "@/lib/orbit/simClockLabels";
 
 const OPERATOR_ID = "demo";
-const FOCUS_SAT = "EO-12";
 
 /** v2 bundle — multiple sessions */
 const STORAGE_BUNDLE = "node-agent-chat-v2";
@@ -33,6 +35,30 @@ const STORAGE_PLAN_ANCHOR = "node-agent-plan-anchor";
 
 const MAX_SESSIONS = 40;
 
+/** Append new agent plans without dropping earlier pending proposals (dedupe by ``plan_id``). */
+function mergeProposedPlans(prev: PlanResponse[], incoming: PlanResponse[]): PlanResponse[] {
+  const seen = new Set(prev.map((p) => p.plan_id));
+  const next = [...prev];
+  for (const p of incoming) {
+    if (!seen.has(p.plan_id)) {
+      next.push(p);
+      seen.add(p.plan_id);
+    }
+  }
+  return next;
+}
+
+const BURN_VS_SIM_MARGIN_MS = 1000;
+
+/** True if any maneuver epoch is strictly before ``sim`` minus 1 s (aligned with API burn-epoch gate). */
+function planHasBurnBeforeSimInstant(plan: PlanResponse, sim: Date): boolean {
+  const simMs = sim.getTime();
+  return plan.maneuvers.some((m) => {
+    const t = Date.parse(m.epoch_utc);
+    return !Number.isFinite(t) || t < simMs - BURN_VS_SIM_MARGIN_MS;
+  });
+}
+
 /** text-xs ~15px line + py-2 (8px×2) — minimum two visible lines. */
 const TEXTAREA_LINE_PX = 15;
 const TEXTAREA_PAD_Y_PX = 16;
@@ -42,12 +68,12 @@ const TEXTAREA_MIN_HEIGHT_PX = TEXTAREA_LINE_PX * TEXTAREA_MIN_LINES + TEXTAREA_
 const GREETING: ChatMessage = {
   role: "assistant",
   content:
-    "I'm monitoring your constellation. EO-12 has one active conjunction above your mitigation threshold — type \"tell me about CJX-2041\" to start.",
+    "I'm here for conjunction situational awareness. Run **catalog screening** in the ops shell (the API persists hits to SQLite). For fleet-wide questions I can call **get_operator_reference** (includes **catalog_entries** with each asset's `sat_id`, NORAD id, and name — use those ids for orbit plans) plus ingest presets like `starlink` and house-rule keys like `EO-CONSTELLATION`, and **get_fleet_conjunctions** — ask about risk, timing, or orbit changes anytime.",
 };
 
 const THINKING_HINTS = [
   "Reviewing your request…",
-  "Checking mock conjunctions and satellite state…",
+  "Checking persisted screening events and satellite state…",
   "Calling the model…",
 ] as const;
 
@@ -212,56 +238,176 @@ function TypingBubble({ text }: { text: string }) {
   );
 }
 
-function PlanCard({ plan }: { plan: PlanResponse }) {
-  const burn = plan.maneuvers[0];
-  if (!burn) return null;
-  const { x, y, z } = burn.delta_v_mps;
+type PlanCardProps = {
+  plan: PlanResponse;
+  globeShowsProposalPreview: boolean;
+  onCancelGlobePreview: () => void;
+  onShowGlobePreview: () => void;
+  onApprove: () => void;
+  onDeny: () => void;
+};
+
+function PlanCard({
+  plan,
+  globeShowsProposalPreview,
+  onCancelGlobePreview,
+  onShowGlobePreview,
+  onApprove,
+  onDeny,
+}: PlanCardProps) {
+  const { getSimInstant } = useSimClock();
+  const [, setTick] = useState(0);
+  const nonEci = plan.maneuvers.some((m) => String(m.frame).toUpperCase() !== "ECI");
+
+  useEffect(() => {
+    if (plan.maneuvers.length === 0) return;
+    let id = 0;
+    const loop = () => {
+      setTick((n) => (n + 1) % 10_000);
+      id = requestAnimationFrame(loop);
+    };
+    id = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(id);
+  }, [plan.maneuvers.length]);
+
+  if (plan.maneuvers.length === 0) return null;
+
+  const simInstant = getSimInstant();
+  const simMs = simInstant.getTime();
+  const burnBeforeSim = planHasBurnBeforeSimInstant(plan, simInstant);
+  const effectiveValidationPassed = plan.validation_passed && !burnBeforeSim;
 
   return (
     <div className="flex justify-start">
-      <Card className="w-full max-w-[95%]">
-        <CardHeader className="p-3 pb-2">
-          <CardTitle className="text-xs">Proposed maneuver · {plan.sat_id}</CardTitle>
+      <Card className="w-full max-w-[95%] border-border/60 shadow-md ring-1 ring-black/[0.03] dark:ring-white/[0.06]">
+        <CardHeader className="space-y-0.5 p-3 pb-2">
+          <CardTitle className="text-xs font-semibold tracking-tight">
+            Proposed plan · {plan.sat_id} · {plan.maneuvers.length} burn
+            {plan.maneuvers.length === 1 ? "" : "s"}
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-2 p-3 pt-0">
-          <div className="rounded-md border border-border bg-background p-2 font-mono text-[11px] leading-relaxed">
-            <div className="flex items-center justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
-              <span>Δv ({burn.frame}, m/s)</span>
-              <span className="font-mono text-foreground">
-                [{x.toFixed(3)}, {y.toFixed(3)}, {z.toFixed(3)}]
-              </span>
-            </div>
+          <div className="space-y-2 rounded-md border border-border bg-background p-2 font-mono text-[11px] leading-relaxed">
+            {plan.maneuvers.map((m, i) => {
+              const { x, y, z } = m.delta_v_mps;
+              const mag = Math.hypot(x, y, z);
+              const burnMs = Date.parse(m.epoch_utc);
+              const tminus =
+                Number.isFinite(burnMs) ? formatTMinusSim(simMs, burnMs) : "T− — (invalid epoch)";
+              return (
+                <div
+                  key={`${m.epoch_utc}-${i}`}
+                  className={i > 0 ? "border-t border-border/60 pt-2" : ""}
+                >
+                  <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Burn {i + 1} · {m.frame || "ECI"}
+                  </div>
+                  <div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground">
+                    <div>
+                      <span className="text-foreground/80">When (UTC): </span>
+                      <span className="text-foreground">{formatBurnUtcReadable(m.epoch_utc)}</span>
+                    </div>
+                    <div>
+                      <span className="text-foreground/80">Clock: </span>
+                      <span className="tabular-nums text-foreground">{tminus}</span>
+                    </div>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-[10px]">
+                    <span className="uppercase tracking-wide text-muted-foreground">Δv (m/s)</span>
+                    <span className="font-mono text-foreground">
+                      [{x.toFixed(4)}, {y.toFixed(4)}, {z.toFixed(4)}]
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    ‖Δv‖ = <span className="tabular-nums text-foreground">{mag.toFixed(4)}</span> m/s
+                  </div>
+                </div>
+              );
+            })}
             <Separator className="my-2" />
             <div className="flex items-center justify-between text-[10px] text-muted-foreground">
-              <span>Total ‖Δv‖</span>
-              <span className="text-foreground">{plan.total_delta_v_mps.toFixed(4)} m/s</span>
+              <span>Plan total ‖Δv‖</span>
+              <span className="tabular-nums text-foreground">{plan.total_delta_v_mps.toFixed(4)} m/s</span>
             </div>
             <Separator className="my-2" />
             <div className="text-[11px] text-muted-foreground">{plan.objective}</div>
           </div>
-          <div className="flex items-center gap-1">
-            {plan.validation_passed ? (
-              <Badge variant="outline" className="font-mono text-[10px] text-green-400">
-                validation passed
-              </Badge>
-            ) : (
-              <Badge variant="destructive" className="font-mono text-[10px]">
-                validation failed
-              </Badge>
-            )}
+          {nonEci ? (
+            <p className="text-[10px] text-amber-600">
+              Globe supports ECI burns only. Re-express maneuvers in ECI before you can approve.
+            </p>
+          ) : (
+            <p className="text-[10px] text-muted-foreground">
+              Before <strong>Approve</strong>: only Δv arrows on the catalog orbit (no orbit change).{" "}
+              <strong>Approve</strong> applies the burn in the preview propagator. Use{" "}
+              <strong>Cancel preview</strong> to hide arrows; restore with <strong>Show burn preview</strong>.
+            </p>
+          )}
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-1">
+              {effectiveValidationPassed ? (
+                <Badge variant="outline" className="font-mono text-[10px] text-green-400">
+                  validation passed
+                </Badge>
+              ) : (
+                <Badge variant="destructive" className="font-mono text-[10px]">
+                  validation failed
+                </Badge>
+              )}
+            </div>
+            {plan.validation_passed && burnBeforeSim ? (
+              <p className="text-[10px] text-amber-600">
+                One or more burns are before the ops sim clock; they cannot be treated as valid to
+                execute from this timeline.
+              </p>
+            ) : null}
           </div>
+          {!nonEci && !globeShowsProposalPreview ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-7 w-full text-[10px]"
+              disabled={!effectiveValidationPassed}
+              onClick={onShowGlobePreview}
+            >
+              Show burn preview on globe
+            </Button>
+          ) : null}
+          {!nonEci && globeShowsProposalPreview ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 w-full text-[10px]"
+              onClick={onCancelGlobePreview}
+            >
+              Cancel burn preview (globe)
+            </Button>
+          ) : null}
           <div className="grid grid-cols-2 gap-2">
-            <Button size="sm" variant="secondary" type="button" className="h-8 text-xs" asChild>
-              <Link href={`/planner/${plan.sat_id}`}>Edit in planner</Link>
+            <Button
+              size="sm"
+              type="button"
+              variant="default"
+              className="h-8 text-xs"
+              disabled={nonEci || !effectiveValidationPassed}
+              title="Apply burns in the preview propagator (orbit changes on the globe)."
+              onClick={onApprove}
+            >
+              <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+              Approve
             </Button>
             <Button
               size="sm"
               type="button"
-              className="h-8 text-xs"
-              onClick={() => console.log("Approve plan:", plan.plan_id)}
+              variant="outline"
+              className="h-8 border-destructive/50 text-xs text-destructive hover:bg-destructive/10"
+              title="Decline this proposal and remove the preview from the globe."
+              onClick={onDeny}
             >
-              <ShieldCheck className="mr-1 h-3.5 w-3.5" />
-              Approve
+              <Ban className="mr-1 h-3.5 w-3.5" />
+              Deny
             </Button>
           </div>
         </CardContent>
@@ -271,6 +417,22 @@ function PlanCard({ plan }: { plan: PlanResponse }) {
 }
 
 export function AgentChat() {
+  const { getSimInstant } = useSimClock();
+  const {
+    primarySatId,
+    conjunctionHits,
+    selectedConjunctionId,
+    replaceSatSelection,
+    maneuverPreviewConfig,
+    setManeuverPreviewConfig,
+    clearConjunctionHitsForOperator,
+    setSelectedConjunctionId,
+  } = useOpsShell();
+  const selectedConjunction = useMemo(
+    () => conjunctionHits.find((e) => e.id === selectedConjunctionId) ?? null,
+    [conjunctionHits, selectedConjunctionId],
+  );
+
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -284,11 +446,19 @@ export function AgentChat() {
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const sessionId = useRef<string>("");
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const typingTargetRef = useRef("");
   const pendingPlansRef = useRef<PlanResponse[] | null>(null);
+  const proposedPlansRef = useRef<PlanResponse[]>([]);
   const assistantInsertIndexRef = useRef<number>(0);
+  /** Latest preview plan id — avoids stale closures on Cancel. */
+  const maneuverPreviewPlanIdRef = useRef<string | null>(null);
+  /** Plan ids the operator hid with Cancel; blocks the auto-preview effect from immediately re-applying. */
+  const suppressedAutoPreviewPlanIdsRef = useRef<Set<string>>(new Set());
+
+  proposedPlansRef.current = proposedPlans;
+  maneuverPreviewPlanIdRef.current = maneuverPreviewConfig?.planId ?? null;
 
   const isBusy = agentPhase !== "idle";
 
@@ -350,6 +520,7 @@ export function AgentChat() {
     setHydrated(true);
   }, [persistBundle]);
 
+
   useEffect(() => {
     if (!hydrated || !activeSessionId) return;
     setSessions((prev) => {
@@ -395,9 +566,9 @@ export function AgentChat() {
   }, [agentPhase]);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollIntoView({ behavior: "smooth" });
-    }
+    const el = chatScrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, agentPhase, typingVisible, planAnchorIndex, proposedPlans]);
 
   useEffect(() => {
@@ -434,7 +605,7 @@ export function AgentChat() {
         });
 
         if (plans && plans.length > 0) {
-          setProposedPlans(plans);
+          setProposedPlans((prev) => mergeProposedPlans(prev, plans));
           setPlanAnchorIndex(insertAt);
         }
 
@@ -504,51 +675,217 @@ export function AgentChat() {
     applyTextareaHeight(e.target);
   }
 
-  async function handleSend() {
-    const text = input.trim();
-    if (!text || isBusy) return;
+  const submitUserMessage = useCallback(
+    async (rawText: string) => {
+      const text = rawText.trim();
+      if (!text || agentPhase !== "idle") return;
 
-    const userMsg: ChatMessage = { role: "user", content: text };
-    const nextMessages = [...messages, userMsg];
-    setMessages(nextMessages);
-    setInput("");
-    setThinkingHintIdx(0);
+      const userMsg: ChatMessage = { role: "user", content: text };
+      const nextMessages = [...messages, userMsg];
+      setMessages(nextMessages);
+      setInput("");
+      setThinkingHintIdx(0);
 
-    assistantInsertIndexRef.current = nextMessages.length;
+      assistantInsertIndexRef.current = nextMessages.length;
 
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-      applyTextareaHeight(textareaRef.current);
-    }
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+        applyTextareaHeight(textareaRef.current);
+      }
 
-    setAgentPhase("thinking");
+      setAgentPhase("thinking");
 
-    try {
-      const res: AgentTurnResponse = await postAgentTurn({
-        session_id: sessionId.current,
-        operator_id: OPERATOR_ID,
-        messages: nextMessages,
-        focus_sat_id: FOCUS_SAT,
+      try {
+        const burnCoversSelected =
+          maneuverPreviewConfig?.burnApplied === true &&
+          selectedConjunction != null &&
+          (selectedConjunction.primary_sat_id === maneuverPreviewConfig.satId ||
+            selectedConjunction.secondary_sat_id === maneuverPreviewConfig.satId);
+
+        const conjunction_context =
+          burnCoversSelected || selectedConjunction == null
+            ? undefined
+            : {
+                conjunction_id: selectedConjunction.id,
+                primary_sat_id: selectedConjunction.primary_sat_id,
+                secondary_sat_id: selectedConjunction.secondary_sat_id,
+                tca_utc: selectedConjunction.tca_utc,
+                miss_distance_km: selectedConjunction.miss_distance_km,
+                pc_heuristic: selectedConjunction.pc_heuristic,
+                source: "CATALOG_SCREEN",
+              };
+
+        const res: AgentTurnResponse = await postAgentTurn({
+          session_id: sessionId.current,
+          operator_id: OPERATOR_ID,
+          messages: nextMessages,
+          ...(primarySatId ? { focus_sat_id: primarySatId } : {}),
+          ...(conjunction_context ? { conjunction_context } : {}),
+        });
+        pendingPlansRef.current = res.proposed_plans.length > 0 ? res.proposed_plans : null;
+        typingTargetRef.current = res.assistant_message;
+        setTypingVisible("");
+        setAgentPhase("typing");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        setMessages((prev) => [...prev, { role: "assistant", content: `[Error contacting agent: ${msg}]` }]);
+        pendingPlansRef.current = null;
+        setAgentPhase("idle");
+      }
+    },
+    [agentPhase, messages, maneuverPreviewConfig, primarySatId, selectedConjunction],
+  );
+
+  const handleSend = useCallback(() => {
+    void submitUserMessage(input);
+  }, [input, submitUserMessage]);
+
+  const applyPlanPreview = useCallback(
+    (p: PlanResponse, opts?: { burnApplied?: boolean }) => {
+      const burnApplied = opts?.burnApplied ?? true;
+      replaceSatSelection([p.sat_id]);
+      const maneuvers = p.maneuvers.map((m) => ({
+        epoch_utc: m.epoch_utc,
+        delta_v_mps: { ...m.delta_v_mps },
+        frame: m.frame || "ECI",
+      }));
+      const anchorUtcMs = getSimInstant().getTime();
+      setManeuverPreviewConfig({
+        planId: p.plan_id,
+        satId: p.sat_id,
+        maneuvers,
+        timelineWindowMs: computeManeuverTimelineWindowMs(anchorUtcMs, maneuvers),
+        burnApplied,
+        ...(burnApplied ? { trajectoryPreviewAnchorUtc: new Date(anchorUtcMs).toISOString() } : {}),
       });
-      pendingPlansRef.current = res.proposed_plans.length > 0 ? res.proposed_plans : null;
-      typingTargetRef.current = res.assistant_message;
-      setTypingVisible("");
-      setAgentPhase("typing");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      setMessages((prev) => [...prev, { role: "assistant", content: `[Error contacting agent: ${msg}]` }]);
-      pendingPlansRef.current = null;
-      setAgentPhase("idle");
-    }
-  }
+    },
+    [getSimInstant, replaceSatSelection, setManeuverPreviewConfig],
+  );
 
-  const plan = proposedPlans[0];
+  const firstProposalKey = useMemo(() => {
+    const p = proposedPlans[0];
+    if (!p) return "";
+    return `${p.plan_id}|${p.sat_id}|${p.maneuvers.map((m) => `${m.epoch_utc}:${m.delta_v_mps.x},${m.delta_v_mps.y},${m.delta_v_mps.z}`).join("|")}`;
+  }, [proposedPlans]);
+
+  /** Proposal: nominal orbit + Δv arrows only (``burnApplied: false``) until Approve or cancel. */
+  useEffect(() => {
+    if (!firstProposalKey) return;
+    if (maneuverPreviewConfig?.burnApplied === true) return;
+    const plans = proposedPlansRef.current;
+    const p = plans[0];
+    if (!p) return;
+    for (const id of [...suppressedAutoPreviewPlanIdsRef.current]) {
+      if (!plans.some((pl) => pl.plan_id === id)) suppressedAutoPreviewPlanIdsRef.current.delete(id);
+    }
+    if (suppressedAutoPreviewPlanIdsRef.current.has(p.plan_id)) return;
+    if (p.maneuvers.some((m) => String(m.frame).toUpperCase() !== "ECI")) return;
+    if (!p.validation_passed || planHasBurnBeforeSimInstant(p, getSimInstant())) return;
+    applyPlanPreview(p, { burnApplied: false });
+  }, [
+    applyPlanPreview,
+    firstProposalKey,
+    getSimInstant,
+    maneuverPreviewConfig?.burnApplied,
+  ]);
+
+  const handlePlanApprove = useCallback(
+    (p: PlanResponse) => {
+      if (!p.validation_passed || planHasBurnBeforeSimInstant(p, getSimInstant())) return;
+      clearConjunctionHitsForOperator();
+      setSelectedConjunctionId(null);
+      const nonEci = p.maneuvers.some((m) => String(m.frame).toUpperCase() !== "ECI");
+      if (!nonEci) {
+        applyPlanPreview(p, { burnApplied: true });
+      }
+      setProposedPlans((prev) => {
+        const next = prev.filter((x) => x.plan_id !== p.plan_id);
+        if (next.length === 0) setPlanAnchorIndex(null);
+        return next;
+      });
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content:
+            `**Operator approved** plan \`${p.plan_id}\` for **${p.sat_id}** (total ‖Δv‖ ${p.total_delta_v_mps.toFixed(2)} m/s). ` +
+            "The globe now uses the **propagated** maneuver preview (catalog TLE + applied Δv in the preview model). " +
+            "This UI does not command the spacecraft.",
+        },
+      ]);
+    },
+    [applyPlanPreview, clearConjunctionHitsForOperator, getSimInstant, setSelectedConjunctionId],
+  );
+
+  const handlePlanDeny = useCallback(
+    (p: PlanResponse) => {
+      setSelectedConjunctionId(null);
+      if (maneuverPreviewConfig?.planId === p.plan_id) {
+        setManeuverPreviewConfig(null);
+      }
+      setProposedPlans((prev) => {
+        const next = prev.filter((x) => x.plan_id !== p.plan_id);
+        if (next.length === 0) setPlanAnchorIndex(null);
+        return next;
+      });
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `**Operator declined** plan \`${p.plan_id}\` for **${p.sat_id}**. Ask the agent for another option if you need one.`,
+        },
+      ]);
+    },
+    [maneuverPreviewConfig?.planId, setManeuverPreviewConfig, setSelectedConjunctionId],
+  );
+
+  const globeShowsProposalFor = useCallback(
+    (p: PlanResponse) => {
+      const c = maneuverPreviewConfig;
+      if (!c || c.burnApplied || c.planId !== p.plan_id) return false;
+      return true;
+    },
+    [maneuverPreviewConfig],
+  );
+
+  const handleCancelGlobePreviewFor = useCallback(
+    (p: PlanResponse) => {
+      if (maneuverPreviewPlanIdRef.current === p.plan_id) {
+        suppressedAutoPreviewPlanIdsRef.current.add(p.plan_id);
+        setManeuverPreviewConfig(null);
+      }
+    },
+    [setManeuverPreviewConfig],
+  );
+
+  const handleShowGlobePreviewFor = useCallback(
+    (p: PlanResponse) => {
+      if (!p.validation_passed || planHasBurnBeforeSimInstant(p, getSimInstant())) return;
+      if (p.maneuvers.some((m) => String(m.frame).toUpperCase() !== "ECI")) return;
+      suppressedAutoPreviewPlanIdsRef.current.delete(p.plan_id);
+      applyPlanPreview(p, { burnApplied: false });
+    },
+    [applyPlanPreview, getSimInstant],
+  );
+
+  useEffect(() => {
+    const onDraft = (ev: Event) => {
+      const ce = ev as CustomEvent<{ text?: string }>;
+      const t = ce.detail?.text;
+      if (typeof t !== "string" || !t.trim()) return;
+      void submitUserMessage(t);
+    };
+    window.addEventListener("node-agent-set-draft", onDraft as EventListener);
+    return () => window.removeEventListener("node-agent-set-draft", onDraft as EventListener);
+  }, [submitUserMessage]);
 
   return (
-    <aside className="flex min-h-0 w-full min-w-0 flex-col border-l border-border bg-background/60">
-      <div className="flex items-center justify-between gap-2 px-3 py-2">
-        <div className="flex min-w-0 flex-1 items-center gap-1">
-          <span className="shrink-0 text-xs font-semibold tracking-wide text-muted-foreground">AGENT</span>
+    <aside className="flex h-full min-h-0 w-full min-w-0 flex-col">
+      <div className="flex items-center justify-between gap-2 border-b border-border/50 bg-muted/10 px-3 py-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="shrink-0 text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground/90">
+            Agent
+          </span>
           <Button
             type="button"
             variant="ghost"
@@ -573,31 +910,48 @@ export function AgentChat() {
             <MessageSquarePlus className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <Badge variant="outline" className="shrink-0 font-mono text-[10px]">
+        <Badge
+          variant="outline"
+          className="shrink-0 border-emerald-500/30 bg-emerald-500/10 font-mono text-[10px] text-emerald-700 dark:text-emerald-400/90"
+        >
           live
         </Badge>
       </div>
-      <Separator />
-      <ScrollArea className="min-h-0 flex-1 px-3 py-3">
+      <Separator className="opacity-50" />
+      <div
+        ref={chatScrollRef}
+        className="h-0 min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-3"
+      >
         <div className="space-y-3">
           {messages.map((msg, i) => (
             <div key={`${i}-${msg.role}-${msg.content.slice(0, 12)}`} className="space-y-3">
               <MessageBubble msg={msg} />
-              {plan && planAnchorIndex === i && agentPhase !== "typing" ? <PlanCard plan={plan} /> : null}
+              {planAnchorIndex === i && agentPhase !== "typing" && proposedPlans.length > 0
+                ? proposedPlans.map((pl) => (
+                    <PlanCard
+                      key={pl.plan_id}
+                      plan={pl}
+                      globeShowsProposalPreview={globeShowsProposalFor(pl)}
+                      onCancelGlobePreview={() => handleCancelGlobePreviewFor(pl)}
+                      onShowGlobePreview={() => handleShowGlobePreviewFor(pl)}
+                      onApprove={() => handlePlanApprove(pl)}
+                      onDeny={() => handlePlanDeny(pl)}
+                    />
+                  ))
+                : null}
             </div>
           ))}
           {agentPhase === "thinking" && <ThinkingIndicator hintIndex={thinkingHintIdx} />}
           {agentPhase === "typing" && <TypingBubble text={typingVisible} />}
-          <div ref={scrollRef} />
         </div>
-      </ScrollArea>
-      <Separator />
-      <div className="p-3">
+      </div>
+      <Separator className="opacity-50" />
+      <div className="border-t border-border/40 bg-muted/5 p-3">
         <textarea
           ref={textareaRef}
           rows={2}
-          placeholder="Message the agent  ·  Enter to send  ·  Shift+Enter for newline"
-          className="w-full resize-none overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs leading-[15px] text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          placeholder="Enter to send  ·  Shift+Enter for newline"
+          className="w-full resize-none overflow-y-auto rounded-lg border border-border/60 bg-background/80 px-3 py-2 font-mono text-xs leading-[15px] text-foreground shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:cursor-not-allowed disabled:opacity-50"
           style={{ minHeight: TEXTAREA_MIN_HEIGHT_PX, maxHeight: 160 }}
           value={input}
           disabled={isBusy}

@@ -4,7 +4,6 @@ import { ChevronRight, Eye, EyeOff, Folder, Satellite, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { FOLDER_LABELS, type FleetFolderId } from "@/lib/orbit/constellationGroups";
@@ -20,14 +19,7 @@ function normalizeSearch(s: string): string {
 export function FleetPanel() {
   const { selectedSatIds, isSatSelected, toggleSatSelection, clearSatSelection } = useOpsShell();
   const [search, setSearch] = useState("");
-  const {
-    loading,
-    error,
-    folderIds,
-    grouped,
-    isFolderPlotted,
-    toggleFolderPlot,
-  } = useFleetCatalog();
+  const { loading, error, folderIds, grouped, isFolderPlotted, toggleFolderPlot } = useFleetCatalog();
 
   const q = normalizeSearch(search);
 
@@ -68,21 +60,23 @@ export function FleetPanel() {
   );
 
   return (
-    <aside className="flex min-h-0 flex-col border-r border-border bg-background/60">
-      <div className="flex items-center justify-between px-3 py-2">
-        <div className="text-xs font-semibold tracking-wide text-muted-foreground">FLEET</div>
-        <div className="font-mono text-[10px] text-muted-foreground">
-          {loading ? "…" : `${totalCount} spacecraft`}
+    <aside className="flex h-full min-h-0 flex-col">
+      <div className="flex items-center justify-between gap-2 border-b border-border/50 bg-muted/10 px-3 py-2.5">
+        <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground/90">Fleet</div>
+        <div className="flex min-w-0 items-center gap-1">
+          <div className="truncate font-mono text-[10px] text-muted-foreground">
+            {loading ? "…" : `${totalCount} spacecraft`}
+          </div>
         </div>
       </div>
-      <Separator />
+      <Separator className="opacity-50" />
       <div className="px-2 pt-2">
         <Input
           type="search"
           placeholder="Search name, NORAD, folder…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="h-8 text-xs"
+          className="h-8 border-border/60 bg-background/80 text-xs shadow-sm"
           aria-label="Search fleet"
         />
       </div>
@@ -104,7 +98,7 @@ export function FleetPanel() {
         </div>
       ) : null}
 
-      <ScrollArea className="min-h-0 flex-1 px-2 py-2">
+      <div className="h-0 min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-2 py-2">
         {error ? (
           <p className="px-2 text-[11px] text-muted-foreground">{error}</p>
         ) : folderIds.length === 0 && !loading ? (
@@ -201,7 +195,7 @@ export function FleetPanel() {
             })}
           </div>
         )}
-      </ScrollArea>
+      </div>
     </aside>
   );
 }

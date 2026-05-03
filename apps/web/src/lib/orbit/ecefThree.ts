@@ -15,3 +15,11 @@ export function ecefToSceneVector3(ecef: ECEF, target = new THREE.Vector3()): TH
   const { x, y, z } = ecef;
   return target.set(x * s, z * s, -y * s);
 }
+
+/** ECI / TEME meters (Z north) → scene Y-up units (same remap as ECEF). */
+export function eciMetersToSceneVector3(
+  eci: readonly [number, number, number],
+  target = new THREE.Vector3(),
+): THREE.Vector3 {
+  return ecefToSceneVector3({ x: eci[0]!, y: eci[1]!, z: eci[2]! }, target);
+}

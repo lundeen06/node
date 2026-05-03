@@ -36,7 +36,8 @@ export function inferFleetFolder(name: string, purpose: string, satId: string): 
   const p = (purpose || "").toUpperCase();
   const id = satId.toLowerCase();
 
-  if (id === "iss" || n.includes("ZARYA") || (n.includes("ISS") && n.includes("SPACE STATION"))) return "iss";
+  if (id === "iss" || id === "demo-iss" || n.includes("ZARYA") || (n.includes("ISS") && n.includes("SPACE STATION")))
+    return "iss";
   if (n.includes("STARLINK")) return "starlink";
   if (
     n.includes("SKYSAT") ||

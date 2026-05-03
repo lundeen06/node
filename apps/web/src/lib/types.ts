@@ -69,11 +69,23 @@ export interface ChatMessage {
   content: string;
 }
 
+/** Optional conjunction focused in the ops UI (from latest catalog screening). */
+export interface AgentConjunctionContext {
+  conjunction_id?: string;
+  primary_sat_id?: string;
+  secondary_sat_id?: string;
+  tca_utc?: string;
+  miss_distance_km?: number;
+  pc_heuristic?: number;
+  source?: string;
+}
+
 export interface AgentTurnRequest {
   session_id: string;
   operator_id: string;
   messages: ChatMessage[];
   focus_sat_id?: string;
+  conjunction_context?: AgentConjunctionContext;
 }
 
 export interface DeltaVMps {

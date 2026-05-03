@@ -2,7 +2,12 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { ApiError, fetchSpacecraftKeplerCatalog, type KeplerCatalogRow } from "@/lib/api";
+import {
+  ApiError,
+  fetchSpacecraftKeplerCatalog,
+  fetchSpacecraftTleBundle,
+  type KeplerCatalogRow,
+} from "@/lib/api";
 import { FOLDER_ORDER, inferFleetFolder, type FleetFolderId } from "@/lib/orbit/constellationGroups";
 import type { KeplerFleetEntry } from "@/lib/orbit/keplerFleet";
 
@@ -23,13 +28,17 @@ export type FleetCatalogContextValue = {
 
 const FleetCatalogContext = createContext<FleetCatalogContextValue | null>(null);
 
-function rowsToEntries(rows: KeplerCatalogRow[]): KeplerFleetEntry[] {
+function rowsToEntries(
+  rows: KeplerCatalogRow[],
+  tleById: ReadonlyMap<string, { tle_line1: string; tle_line2: string }>,
+): KeplerFleetEntry[] {
   const out: KeplerFleetEntry[] = [];
   for (const r of rows) {
     if (!Array.isArray(r.oe) || r.oe.length !== 6) continue;
     const oe = r.oe.map((x) => Number(x));
     if (oe.some((x) => !Number.isFinite(x))) continue;
     const folder = inferFleetFolder(r.name, r.purpose ?? "", r.sat_id);
+    const t = tleById.get(r.sat_id);
     out.push({
       sat_id: r.sat_id,
       name: r.name,
@@ -38,6 +47,8 @@ function rowsToEntries(rows: KeplerCatalogRow[]): KeplerFleetEntry[] {
       ephemeris_epoch_utc: r.ephemeris_epoch_utc,
       oe,
       folder,
+      tle_line1: t?.tle_line1,
+      tle_line2: t?.tle_line2,
     });
   }
   return out;
@@ -54,10 +65,11 @@ export function FleetCatalogProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetchSpacecraftKeplerCatalog(25_000)
-      .then((rows) => {
+    Promise.all([fetchSpacecraftKeplerCatalog(25_000), fetchSpacecraftTleBundle(25_000)])
+      .then(([rows, tles]) => {
         if (cancelled) return;
-        const parsed = rowsToEntries(rows);
+        const tleById = new Map(tles.map((t) => [t.sat_id, { tle_line1: t.tle_line1, tle_line2: t.tle_line2 }]));
+        const parsed = rowsToEntries(rows, tleById);
         setEntries(parsed);
         setHiddenFolders(parsed.length > 0 ? new Set(parsed.map((e) => e.folder)) : new Set());
       })

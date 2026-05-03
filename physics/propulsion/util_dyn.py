@@ -498,17 +498,32 @@ def pv_to_oe(x, mu=mu_E):
         r = la.norm(rvec)
         v = la.norm(vvec)
         h = la.norm(hvec)
-            
-        nvec = np.cross(np.array([0,0,1]), hvec) / np.linalg.norm(np.cross(np.array([0,0,1]), hvec))
-        
-        ene = 1/2*v**2 - mu/r
-        a = -mu/(2*ene)
-        evec = (np.cross(vvec, hvec) - mu*rvec/r) / mu
+
+        ene = 1 / 2 * v**2 - mu / r
+        a = -mu / (2 * ene)
+        evec = (np.cross(vvec, hvec) - mu * rvec / r) / mu
         e = la.norm(evec)
-        i = np.arccos(hvec[2]/h)
-        Omega = np.arctan2(nvec[1], nvec[0])
-        omega = np.arctan2(np.dot(np.cross(nvec, evec), hvec) / h, np.dot(nvec, evec)) 
-        nu =  np.arctan2(np.dot(np.cross(evec, rvec), hvec) / (h*e), np.dot(evec, rvec) / e) 
+        i = np.arccos(np.clip(hvec[2] / h, -1.0, 1.0))
+        sin_i = np.sin(i)
+
+        # Equatorial (h ∥ ±ẑ): line of nodes is undefined; avoid 0/0 in node vector.
+        if sin_i < 1e-10:
+            Omega = 0.0
+            if e < 1e-12:
+                omega = 0.0
+                nu = np.arctan2(rvec[1], rvec[0])
+            else:
+                omega = np.arctan2(evec[1], evec[0])
+                nu = np.arctan2(
+                    np.dot(np.cross(evec, rvec), hvec) / (h * e),
+                    np.dot(evec, rvec) / e,
+                )
+        else:
+            n_cross = np.cross(np.array([0.0, 0.0, 1.0]), hvec)
+            nvec = n_cross / la.norm(n_cross)
+            Omega = np.arctan2(nvec[1], nvec[0])
+            omega = np.arctan2(np.dot(np.cross(nvec, evec), hvec) / h, np.dot(nvec, evec))
+            nu = np.arctan2(np.dot(np.cross(evec, rvec), hvec) / (h * e), np.dot(evec, rvec) / e)
         assert e < 1 + 1e-5, 'Eccentricity must be less than 1 for Keplerian elements'
         
         E = 2 * np.arctan(np.sqrt((1-e)/(1+e))*np.tan(nu/2))

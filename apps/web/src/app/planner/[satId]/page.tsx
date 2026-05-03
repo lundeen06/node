@@ -3,6 +3,7 @@ import Link from "next/link";
 import { BurnVectorEditor } from "@/components/planner/BurnVectorEditor";
 import { ImpactPanel } from "@/components/planner/ImpactPanel";
 import { ManeuverDiff } from "@/components/planner/ManeuverDiff";
+import { PlannerLibraryPanel } from "@/components/planner/PlannerLibraryPanel";
 import { TopBar } from "@/components/shell/TopBar";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,7 +24,7 @@ export default function PlannerPage({ params }: { params: { satId: string } }) {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Badge variant="outline">stub</Badge>
+            <Badge variant="outline">library</Badge>
             <Link className="text-xs text-muted-foreground hover:text-foreground" href="/ops">
               ← Back to ops
             </Link>
@@ -36,6 +37,7 @@ export default function PlannerPage({ params }: { params: { satId: string } }) {
             <TabsTrigger value="constraints">Constraints</TabsTrigger>
             <TabsTrigger value="dv">Δv vector</TabsTrigger>
             <TabsTrigger value="target">Target state</TabsTrigger>
+            <TabsTrigger value="library">Library</TabsTrigger>
           </TabsList>
 
           <TabsContent value="chat">
@@ -79,6 +81,10 @@ export default function PlannerPage({ params }: { params: { satId: string } }) {
                 loops.
               </CardContent>
             </Card>
+          </TabsContent>
+
+          <TabsContent value="library">
+            <PlannerLibraryPanel />
           </TabsContent>
         </Tabs>
 

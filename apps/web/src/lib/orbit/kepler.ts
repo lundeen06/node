@@ -9,6 +9,27 @@ export const J2 = 0.001082635819197;
 
 const TWO_PI = 2 * Math.PI;
 
+/** Below ~6.4e6 m, ``a`` cannot be a physical Earth-centric SMA in meters (Earth radius ≈ 6.378e6 m). */
+const SMA_M_MIN_PHYSICAL = 6.4e6;
+/**
+ * GP / JSON sometimes stores semi-major axis in **kilometers** in the first slot while the
+ * rest of the pipeline expects **meters**. Values in this band (km) yield absurdly large
+ * mean motion if used as meters, so high orbits appear to outrun LEO.
+ */
+const SMA_KM_ENCODED_MIN = 3_000;
+const SMA_KM_ENCODED_MAX = 500_000;
+
+/** Return a copy of ``oe`` with ``a`` converted to meters when it is clearly km-as-m. */
+export function normalizeOeSemiMajorAxisMeters(oe: readonly number[]): number[] {
+  const a = oe[0]!;
+  if (!Number.isFinite(a) || a <= 0) return [...oe];
+  if (a >= SMA_M_MIN_PHYSICAL) return [...oe];
+  if (a < SMA_KM_ENCODED_MIN || a > SMA_KM_ENCODED_MAX) return [...oe];
+  const aM = a * 1000;
+  if (aM < SMA_M_MIN_PHYSICAL) return [...oe];
+  return [aM, oe[1]!, oe[2]!, oe[3]!, oe[4]!, oe[5]!];
+}
+
 export function mod2pi(x: number): number {
   return ((x % TWO_PI) + TWO_PI) % TWO_PI;
 }
@@ -36,12 +57,13 @@ export function meanToEccAnomaly(M: number, e: number, tol = 1e-8, maxIter = 100
 
 /** Secular J2 propagation from oe0 at dt seconds (matches ``propagate_oe`` scalar path). */
 export function propagateOeJ2(oe0: readonly number[], dtSec: number): number[] {
+  const oeNorm = normalizeOeSemiMajorAxisMeters(oe0);
   const mu = MU_EARTH;
   const R = R_EARTH;
   const J2v = J2;
-  const a = oe0[0];
-  const e = oe0[1];
-  const i = oe0[2];
+  const a = oeNorm[0]!;
+  const e = oeNorm[1]!;
+  const i = oeNorm[2]!;
   const n = Math.sqrt(mu / (a * a * a));
   const eta = Math.sqrt(1 - e * e);
   const kappa = (0.75 * J2v * R * R * Math.sqrt(mu)) / (Math.pow(a, 3.5) * eta ** 4);
@@ -52,12 +74,12 @@ export function propagateOeJ2(oe0: readonly number[], dtSec: number): number[] {
   const mDot = n + kappa * eta * P;
   const dt = dtSec;
   return [
-    oe0[0],
-    oe0[1],
-    oe0[2],
-    mod2pi(oe0[3] + raanDot * dt),
-    mod2pi(oe0[4] + aopDot * dt),
-    mod2pi(oe0[5] + mDot * dt),
+    oeNorm[0]!,
+    oeNorm[1]!,
+    oeNorm[2]!,
+    mod2pi(oeNorm[3]! + raanDot * dt),
+    mod2pi(oeNorm[4]! + aopDot * dt),
+    mod2pi(oeNorm[5]! + mDot * dt),
   ];
 }
 
@@ -107,12 +129,13 @@ function matVec33(A: number[][], v: readonly [number, number, number]): [number,
 
 /** ECI position (meters) from classical elements (same convention as ``util_dyn.oe_to_pv``). */
 export function oeToPositionMeters(oe: readonly number[]): [number, number, number] {
-  const a = oe[0]!;
-  const e = oe[1]!;
-  const i = oe[2]!;
-  const Omega = oe[3]!;
-  const omega = oe[4]!;
-  const M = oe[5]!;
+  const on = normalizeOeSemiMajorAxisMeters(oe);
+  const a = on[0]!;
+  const e = on[1]!;
+  const i = on[2]!;
+  const Omega = on[3]!;
+  const omega = on[4]!;
+  const M = on[5]!;
   const E = meanToEccAnomaly(M, e);
   const nu = 2 * Math.atan(Math.sqrt((1 + e) / (1 - e)) * Math.tan(E / 2));
   const p = a * (1 - e * e);
