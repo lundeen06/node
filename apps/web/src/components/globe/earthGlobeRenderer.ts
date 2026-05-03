@@ -191,15 +191,15 @@ export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
   if (albedoUrl) {
     earthMaterial = new THREE.MeshPhysicalMaterial({
       color: 0xffffff,
-      metalness: 0.04,
-      roughness: 0.58,
-      clearcoat: 0.28,
+      metalness: 0.05,
+      roughness: 0.62,
+      clearcoat: 0.12,
       clearcoatRoughness: 0.32,
       specularIntensity: 1.0,
       specularColor: new THREE.Color(0xe8f4ff),
-      ior: 1.38,
+      ior: 1.1,
       envMapIntensity: 0.44,
-      sheen: 0.12,
+      sheen: 0.24,
       sheenRoughness: 0.85,
       sheenColor: new THREE.Color(0x88a8cc),
     });
