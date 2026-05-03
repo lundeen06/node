@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from enum import StrEnum
+from node_api.compat_enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
