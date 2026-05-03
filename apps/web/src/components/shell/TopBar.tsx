@@ -1,6 +1,6 @@
 "use client";
 
-import { Satellite } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -56,9 +56,14 @@ export function TopBar() {
           className="group relative flex shrink-0 items-center rounded-lg p-0.5 ring-offset-2 ring-offset-background transition-shadow hover:ring-2 hover:ring-primary/20"
           aria-label="node home"
         >
-          <span className="flex h-24 w-24 items-center justify-center rounded-xl bg-primary/10 text-primary shadow-sm ring-1 ring-primary/15 transition-transform group-hover:scale-[1.03]">
-            <Satellite className="h-14 w-14" strokeWidth={1.35} aria-hidden />
-          </span>
+          <Image
+            src="/logo.png"
+            alt="node"
+            width={96}
+            height={96}
+            className="h-12 w-12 object-contain drop-shadow-sm transition-transform group-hover:scale-[1.03]"
+            priority
+          />
         </Link>
       </div>
 
