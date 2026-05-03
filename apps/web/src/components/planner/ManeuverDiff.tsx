@@ -3,7 +3,7 @@ import { Separator } from "@/components/ui/separator";
 import { MOCK_AGENT_PLAN } from "@/lib/mock-data";
 
 export function ManeuverDiff() {
-  const m = MOCK_AGENT_PLAN.maneuvers[0];
+  const m = MOCK_AGENT_PLAN.maneuvers[0] ?? null;
   return (
     <Card>
       <CardHeader className="p-4 pb-2">
@@ -20,8 +20,10 @@ export function ManeuverDiff() {
         <div>
           <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Proposed</div>
           <pre className="mt-2 whitespace-pre-wrap rounded-md border border-border bg-background p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-            {`epoch: ${m?.epoch.instant}
-Δv_RIC: [${m?.deltaVMps.x.toFixed(3)}, ${m?.deltaVMps.y.toFixed(3)}, ${m?.deltaVMps.z.toFixed(3)}] m/s`}
+            {m
+              ? `epoch: ${m.epoch.instant}
+Δv_RIC: [${m.deltaVMps.x.toFixed(3)}, ${m.deltaVMps.y.toFixed(3)}, ${m.deltaVMps.z.toFixed(3)}] m/s`
+              : "epoch: —\nΔv_RIC: (no maneuvers in mock plan)"}
           </pre>
         </div>
         <Separator className="md:col-span-2" />

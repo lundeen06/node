@@ -75,6 +75,14 @@ function getEarthAlbedoUrl(): string | undefined {
   return u && u.length > 0 ? u : undefined;
 }
 
+/** Flex + `min-h-0` often yields `clientWidth`/`clientHeight` of 0 on the first frame; WebGL / post passes must not see 0. */
+function containerDrawSize(container: HTMLElement): { w: number; h: number } {
+  return {
+    w: Math.max(1, container.clientWidth),
+    h: Math.max(1, container.clientHeight),
+  };
+}
+
 function satelliteRadiusScene(ecef: ECEF): number {
   const { h } = ecefToGeodeticWgs84(ecef);
   const altScale = 1 + Math.min(Math.max(0, h) / 4e6, 2.5) * 0.18;
@@ -133,17 +141,13 @@ export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.02;
   renderer.setClearColor(0x02050c, 1);
-  renderer.setSize(container.clientWidth, container.clientHeight);
+  const initial = containerDrawSize(container);
+  renderer.setSize(initial.w, initial.h);
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
 
-  const camera = new THREE.PerspectiveCamera(
-    50,
-    container.clientWidth / Math.max(container.clientHeight, 1),
-    0.05,
-    500,
-  );
+  const camera = new THREE.PerspectiveCamera(50, initial.w / initial.h, 0.05, 500);
   camera.position.set(14, 10, 14);
 
   const controls = new OrbitControls(camera, renderer.domElement);
@@ -283,8 +287,7 @@ export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
   const composer = new EffectComposer(renderer);
   const renderPass = new RenderPass(scene, camera);
   const pr0 = renderer.getPixelRatio();
-  const w0 = container.clientWidth;
-  const h0 = Math.max(container.clientHeight, 1);
+  const { w: w0, h: h0 } = containerDrawSize(container);
   const bloomRes = new THREE.Vector2(Math.floor(w0 * pr0), Math.floor(h0 * pr0));
   const bloomPass = new UnrealBloomPass(bloomRes, 0.26, 0.52, 0.86);
   const smaaPass = new SMAAPass(Math.floor(w0 * pr0), Math.floor(h0 * pr0));
@@ -295,8 +298,7 @@ export function attachEarthGlobe(container: HTMLElement): EarthGlobeHandle {
   composer.addPass(outputPass);
 
   const syncComposerSize = () => {
-    const w = container.clientWidth;
-    const h = Math.max(container.clientHeight, 1);
+    const { w, h } = containerDrawSize(container);
     const pr = renderer.getPixelRatio();
     renderer.setSize(w, h);
     camera.aspect = w / h;
