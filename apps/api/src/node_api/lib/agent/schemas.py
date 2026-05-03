@@ -147,10 +147,11 @@ _AGENT_TOOL_SPECS: list[dict[str, object]] = [
         "description": (
             "Build a Lambert single-impulse avoidance plan from the catalog TLE and a persisted "
             "catalog-screen conjunction (sat_id must be the event primary). Returns maneuvers with "
-            "epoch_utc, delta_v_mps (ECI m/s), frame, and validation entries for the UI. Also returns "
-            "utility_preview: post-maneuver path vs catalog SGP4 if you never burn (one Kozai period from "
-            "first burn), integrated_loss, calibration (RMSE/L, verdicts), product utility, combined_loss vs "
-            "max_auto_delta_v_mps — interpret using calibration."
+            "epoch_utc, delta_v_mps (ECI m/s), frame, and validation entries for the UI. Always returns "
+            "utility_preview (utility_and_loss.utility_unitless < 1 means mission utility reduction vs "
+            "no-burn catalog over the preview window; cite RMSE, calibration verdicts, combined_loss in prose). "
+            "Post-maneuver vs ideal no-burn SGP4 over one Kozai period from first burn + 1 s; integrated_loss "
+            "and RMSE/L ratios quantify opportunity cost traded for separation."
         ),
         "input_schema": {
             "type": "object",
