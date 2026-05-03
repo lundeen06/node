@@ -6,7 +6,6 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-import numpy as np
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,11 +18,7 @@ from node_api.lib.ingress.gp_elements import (
     parse_gp_epoch,
 )
 from node_api.lib.ingress.space_track import fetch_gp_rows
-from node_api.physics_runtime import ensure_physics_importable
-
-ensure_physics_importable()
-from physics.infra.propagate_orbit import propagate_absolute_elements  # noqa: E402
-from physics.infra.slate import AbsoluteOrbitalElements  # noqa: E402
+from node_api.lib.tle_physics import sgp4_position_eci_m
 
 
 def upsert_spacecraft_from_gp(
@@ -157,24 +152,13 @@ def spacecraft_positions_geojson(
     max_count: int,
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
-    """Propagate each stored mean-element set to ``now`` (ECI via physics), project to lon/lat for maps.
-
-    Uses the same pipeline as ``GET /spacecraft/{{sat_id}}/trajectory`` (mean elements + ``propagate_oe`` / J2).
-    """
+    """Propagate each asset with **SGP4** from stored TLE lines at UTC ``now``, then lon/lat for maps."""
     now = (now_utc or datetime.now(tz=UTC)).astimezone(UTC)
     rows = list(session.scalars(select(SpacecraftRow).order_by(SpacecraftRow.sat_id).limit(max_count)))
     features: list[dict[str, Any]] = []
     for row in rows:
         try:
-            els = AbsoluteOrbitalElements.from_vector(tuple(json.loads(row.oe_vector_json)))
-            ep = row.ephemeris_epoch_utc
-            if ep.tzinfo is None:
-                ep = ep.replace(tzinfo=UTC)
-            else:
-                ep = ep.astimezone(UTC)
-            dt_s = (now - ep).total_seconds()
-            pv = propagate_absolute_elements(els, np.array([dt_s], dtype=np.float64), use_j2=True)
-            pos_m = pv[0:3, 0]
+            pos_m = sgp4_position_eci_m(row.tle_line1, row.tle_line2, now)
             lon, lat = eci_m_to_lon_lat_deg(pos_m, now)
             features.append(
                 {

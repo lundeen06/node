@@ -16,17 +16,13 @@ from node_api.db.session import get_session
 from node_api.errors import DataUnavailableError
 from node_api.lib.geodesy import eci_m_to_lon_lat_deg
 from node_api.lib.ingress.constellation_presets import PRESET_METADATA
-from node_api.lib.propagation import propagate_mean_elements_at_times
-from node_api.physics_runtime import ensure_physics_importable
+from node_api.lib.propagation import propagate_tle_sgp4_sample_times
 from node_api.services.spacecraft_catalog import (
     import_constellation_preset,
     register_and_fetch,
     spacecraft_positions_geojson,
     sync_all_registered,
 )
-
-ensure_physics_importable()
-from physics.infra.slate import AbsoluteOrbitalElements  # noqa: E402
 
 router = APIRouter()
 
@@ -90,6 +86,32 @@ class ConstellationPresetOut(BaseModel):
     label: str
     description: str
     patterns: list[str]
+
+
+class TleBundleItem(BaseModel):
+    """Minimal catalog row for client-side SGP4 (no GP blob, no OE vector)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sat_id: str
+    name: str
+    norad_catalog_id: int
+    purpose: str
+    tle_line1: str
+    tle_line2: str
+
+
+class KeplerCatalogItem(BaseModel):
+    """Stored mean/classical elements + epoch for client-side Kepler + J2 secular propagation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sat_id: str
+    name: str
+    norad_catalog_id: int
+    purpose: str
+    ephemeris_epoch_utc: datetime
+    oe: list[float] = Field(..., min_length=6, max_length=6, description="[a_m, e, i, Ω, ω, M] radians for angles")
 
 
 class ImportConstellationIn(BaseModel):
@@ -186,11 +208,69 @@ def spacecraft_map_positions(
     session: Session = Depends(get_session),
     max_count: Annotated[int, Query(ge=1, le=25_000)] = 20_000,
 ) -> dict[str, Any]:
-    """GeoJSON ``FeatureCollection`` of Points: propagated mean elements → ECI → approximate lon/lat at UTC now.
+    """GeoJSON ``FeatureCollection`` of Points: **SGP4** from stored TLE at UTC now → lon/lat.
 
-    Suitable for Mapbox ``geojson`` sources. Cap ``max_count`` for very large catalogs.
+    Cap ``max_count`` for very large catalogs.
     """
     return spacecraft_positions_geojson(session, max_count=max_count)
+
+
+@router.get("/tle-bundle", response_model=list[TleBundleItem])
+def spacecraft_tle_bundle(
+    session: Session = Depends(get_session),
+    max_count: Annotated[int, Query(ge=1, le=25_000)] = 20_000,
+) -> list[TleBundleItem]:
+    """Stored TLE lines only — for browsers that run **SGP4 locally** (e.g. satellite.js).
+
+    One fetch replaces repeated ``/map-positions`` polling; propagation uses the same NORAD model client-side.
+    """
+    rows = list(session.scalars(select(SpacecraftRow).order_by(SpacecraftRow.sat_id).limit(max_count)))
+    return [
+        TleBundleItem(
+            sat_id=r.sat_id,
+            name=r.name,
+            norad_catalog_id=r.norad_catalog_id,
+            purpose=r.purpose or "",
+            tle_line1=r.tle_line1,
+            tle_line2=r.tle_line2,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/kepler-catalog", response_model=list[KeplerCatalogItem])
+def spacecraft_kepler_catalog(
+    session: Session = Depends(get_session),
+    max_count: Annotated[int, Query(ge=1, le=25_000)] = 20_000,
+) -> list[KeplerCatalogItem]:
+    """Persisted ``oe_vector_json`` + ``ephemeris_epoch_utc`` for browser Keplerian propagators.
+
+    Element order matches ``physics.infra.slate.AbsoluteOrbitalElements.as_vector`` (``a`` in meters).
+    """
+    rows = list(session.scalars(select(SpacecraftRow).order_by(SpacecraftRow.sat_id).limit(max_count)))
+    out: list[KeplerCatalogItem] = []
+    for r in rows:
+        try:
+            oe = json.loads(r.oe_vector_json)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(oe, list) or len(oe) != 6:
+            continue
+        try:
+            floats = [float(x) for x in oe]
+        except (TypeError, ValueError):
+            continue
+        out.append(
+            KeplerCatalogItem(
+                sat_id=r.sat_id,
+                name=r.name,
+                norad_catalog_id=r.norad_catalog_id,
+                purpose=r.purpose or "",
+                ephemeris_epoch_utc=r.ephemeris_epoch_utc,
+                oe=floats,
+            ),
+        )
+    return out
 
 
 @router.get("/{sat_id}", response_model=SpacecraftDetail)
@@ -212,11 +292,10 @@ def spacecraft_trajectory(
     step_seconds: Annotated[float, Query(gt=1, le=3600)] = 60.0,
     include_llh: Annotated[bool, Query(description="Include approximate lon/lat for map clients.")] = False,
 ) -> TrajectoryOut:
-    """Propagate stored mean elements with ``physics.propulsion.util_dyn.propagate_oe`` (+ optional J2)."""
+    """Propagate stored TLE lines with **SGP4** at each sample time (NORAD model)."""
     row = session.get(SpacecraftRow, sat_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Unknown spacecraft {sat_id!r}.")
-    els = AbsoluteOrbitalElements.from_vector(tuple(json.loads(row.oe_vector_json)))
     now = datetime.now(tz=UTC)
     end = now + timedelta(minutes=duration_minutes)
     times: list[datetime] = []
@@ -226,7 +305,12 @@ def spacecraft_trajectory(
         t += timedelta(seconds=step_seconds)
     if len(times) < 2:
         times = [now, end]
-    traj = propagate_mean_elements_at_times(els, row.ephemeris_epoch_utc, times, row.sat_id, use_j2=True)
+    try:
+        traj = propagate_tle_sgp4_sample_times(row.tle_line1, row.tle_line2, times, row.sat_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DataUnavailableError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     samples: list[TrajectorySampleOut] = []
     for s in traj.samples:
         lon_lat: tuple[float, float] | None = None

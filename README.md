@@ -54,7 +54,7 @@ npm run dev
 
 Open `http://localhost:3000` (redirects to `/ops`). Prefer a normal browser window (Chrome/Firefox/Safari), not a stripped-down embedded preview, so `/_next/static/...` assets load reliably.
 
-**Globe:** `apps/web/src/components/globe/earthGlobeRenderer.ts` builds the Earth sphere, **OrbitControls**, and time-stepped satellites from `getSatelliteECEF` in `apps/web/src/lib/orbit/satellite-propagation.ts` (replace with SGP4). Positions are **ECEF meters** converted to the scene via `ecefToSceneVector3` in `apps/web/src/lib/orbit/ecefThree.ts`.
+**Globe:** `apps/web/src/components/globe/earthGlobeRenderer.ts` builds the Earth sphere (Three.js), **OrbitControls**, PMREM/bloom, and **fleet Points** from `GET /spacecraft/map-positions` (lon/lat → WGS84 ECEF via `lonLatDegHeightToEcef`, then `ecefToSceneVector3`). Ground tracks use `/spacecraft/{id}/trajectory` with `include_llh`.
 
 ### Web: Console “SES / lockdown-install.js”
 

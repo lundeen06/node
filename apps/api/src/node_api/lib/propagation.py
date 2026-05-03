@@ -19,7 +19,7 @@ ensure_physics_importable()
 from physics.infra.propagate_orbit import propagate_absolute_elements  # noqa: E402
 from physics.infra.slate import AbsoluteOrbitalElements  # noqa: E402
 
-from node_api.lib.tle_physics import tle_to_absolute_elements_at_epoch  # noqa: E402
+from node_api.lib.tle_physics import trajectory_states_sgp4  # noqa: E402
 
 ForceModelHandle = NewType("ForceModelHandle", str)
 
@@ -106,17 +106,44 @@ def build_force_model(sat_id: str, include_drag: bool, include_srp: bool) -> For
     raise NotImplementedError
 
 
+def propagate_tle_sgp4_sample_times(
+    line1: str,
+    line2: str,
+    sample_times_utc: list[datetime],
+    sat_id: str,
+) -> Trajectory:
+    """Dense trajectory from stored TLE lines using **SGP4** at each sample UTC."""
+    if len(sample_times_utc) < 2:
+        msg = "At least two sample times are required."
+        raise ValueError(msg)
+    states = trajectory_states_sgp4(line1, line2, sample_times_utc)
+    samples: list[TrajectorySample] = []
+    for t, r_km, v_km_s in states:
+        epoch = Epoch(instant=t, scale=TimeScale.UTC)
+        state = StateVector(
+            position_km=Vector3(data=np.asarray(r_km, dtype=np.float64)),
+            velocity_km_s=Vector3(data=np.asarray(v_km_s, dtype=np.float64)),
+            epoch=epoch,
+            frame=Frame.ECI_J2000,
+        )
+        samples.append(TrajectorySample(epoch=epoch, state=state))
+    return Trajectory(sat_id=sat_id, samples=samples)
+
+
 def propagate_sgp4(tle: TLE, interval: Interval, *, use_j2: bool = True) -> Trajectory:
-    """Propagate a TLE by converting to osculating elements at interval start, then ``propagate_oe``."""
+    """Propagate a TLE using **SGP4** at each sample time (standard NORAD model).
+
+    ``use_j2`` is ignored; Kept for API compatibility. SGP4 already includes secular drag/J2 effects
+    appropriate for two-line element sets.
+    """
+    del use_j2
     start = interval.start.as_utc_datetime()
     end = interval.end.as_utc_datetime()
     duration_s = (end - start).total_seconds()
     n = _sample_count(duration_s)
-
-    elements = tle_to_absolute_elements_at_epoch(tle.line1, tle.line2, start.astimezone(UTC))
     dt_grid = np.linspace(0.0, duration_s, n)
-    pv = propagate_absolute_elements(elements, dt_grid, use_j2=use_j2)
-    return _trajectory_from_pv_columns(str(tle.satellite_number), start.astimezone(UTC), duration_s, dt_grid, pv)
+    times = [start + timedelta(seconds=float(x)) for x in dt_grid]
+    return propagate_tle_sgp4_sample_times(tle.line1, tle.line2, times, str(tle.satellite_number))
 
 
 def propagate_numerical(

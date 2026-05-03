@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 
 import { AgentChat } from "./AgentChat";
 import { FleetPanel } from "./FleetPanel";
+import { FleetCatalogProvider } from "./FleetCatalogContext";
 import { OpsShellProvider } from "./OpsShellContext";
 import { TopBar } from "./TopBar";
 
@@ -19,6 +20,7 @@ const Globe = dynamic(() => import("@/components/globe/Globe").then((m) => ({ de
 export function OpsWorkspace() {
   return (
     <OpsShellProvider>
+      <FleetCatalogProvider>
       <div className="flex h-dvh min-h-0 flex-col bg-background">
         <TopBar />
 
@@ -33,6 +35,7 @@ export function OpsWorkspace() {
           <AgentChat />
         </div>
       </div>
+      </FleetCatalogProvider>
     </OpsShellProvider>
   );
 }

@@ -43,7 +43,7 @@ export async function fetchSpacecraftList(): Promise<SpacecraftSummary[]> {
   return (await res.json()) as SpacecraftSummary[];
 }
 
-/** GeoJSON returned by ``GET /spacecraft/map-positions`` (Mapbox-compatible). */
+/** GeoJSON returned by ``GET /spacecraft/map-positions`` (e.g. Mapbox or Three.js clients). */
 export type SpacecraftMapGeoJSON = {
   type: "FeatureCollection";
   features: Array<{
@@ -65,6 +65,44 @@ export async function fetchSpacecraftMapPositions(maxCount = 20_000): Promise<Sp
     throw new ApiError(`Failed to load map positions: ${res.status}`, res.status);
   }
   return (await res.json()) as SpacecraftMapGeoJSON;
+}
+
+/** One row from ``GET /spacecraft/tle-bundle`` for client-side SGP4. */
+export type TleBundleItem = {
+  sat_id: string;
+  name: string;
+  norad_catalog_id: number;
+  purpose: string;
+  tle_line1: string;
+  tle_line2: string;
+};
+
+export async function fetchSpacecraftTleBundle(maxCount = 20_000): Promise<TleBundleItem[]> {
+  const url = `${getApiBaseUrl()}/spacecraft/tle-bundle?max_count=${maxCount}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    throw new ApiError(`Failed to load TLE bundle: ${res.status}`, res.status);
+  }
+  return (await res.json()) as TleBundleItem[];
+}
+
+/** Row from ``GET /spacecraft/kepler-catalog`` (OE matches physics slate / ``propagate_oe``). */
+export type KeplerCatalogRow = {
+  sat_id: string;
+  name: string;
+  norad_catalog_id: number;
+  purpose: string;
+  ephemeris_epoch_utc: string;
+  oe: number[];
+};
+
+export async function fetchSpacecraftKeplerCatalog(maxCount = 20_000): Promise<KeplerCatalogRow[]> {
+  const url = `${getApiBaseUrl()}/spacecraft/kepler-catalog?max_count=${maxCount}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    throw new ApiError(`Failed to load Kepler catalog: ${res.status}`, res.status);
+  }
+  return (await res.json()) as KeplerCatalogRow[];
 }
 
 export type TrajectorySample = {

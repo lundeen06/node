@@ -1,4 +1,4 @@
-"""Space-Track parsing (mocked) and SGP4 propagation via Skyfield."""
+"""Space-Track parsing (mocked) and SGP4 propagation (pysgp4)."""
 
 from __future__ import annotations
 
