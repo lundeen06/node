@@ -26,12 +26,12 @@ from node_api.lib.mission.circular_altitude_transfer import (
 )
 from node_api.lib.mission.collision_avoidance import plan_collision_avoidance as run_lambert_plan
 from node_api.lib.tle_physics import trajectory_states_sgp4
-from node_api.services.spacecraft_catalog import resolve_spacecraft_row
 from node_api.services.conjunction_store import (
     get_conjunction_by_id,
     list_active_conjunctions_for_sat,
     list_all_active_conjunctions,
 )
+from node_api.services.spacecraft_catalog import resolve_spacecraft_row
 from node_api.types.common import Matrix6x6, Vector3
 from node_api.types.conjunction import Conjunction, ConjunctionSource, ConjunctionStatus, PcMethod
 from node_api.types.constellation import HouseRules
@@ -163,18 +163,93 @@ def get_active_conjunctions(sat_id: str, horizon_hours: int = 36) -> dict[str, A
     }
 
 
+def _infer_constellation_id_from_row(row: SpacecraftRow) -> str:
+    """Heuristic constellation tag from name/purpose/sat_id (mirrors fleet folder grouping)."""
+    n = (row.name or "").upper()
+    p = (row.purpose or "").upper()
+    if "STARLINK" in n or "STARLINK" in p:
+        return "STARLINK"
+    if "KUIPER" in n or "KUIPER" in p or "AMAZON" in n:
+        return "KUIPER"
+    if "GALILEO" in n or "GALILEO" in p:
+        return "GALILEO"
+    if "BEIDOU" in n or "BEIDOU" in p:
+        return "BEIDOU"
+    if "NAVSTAR" in n or "GPS BIIF" in n or "GPS BIII" in n or "GPS" in p or "NAVSTAR" in p:
+        return "GPS"
+    if "PLANET" in n or "FLOCK" in n or "DOVE" in n or "SKYSAT" in n or "PLANET" in p:
+        return "PLANET"
+    if (row.sat_id or "").lower().startswith("00-demo"):
+        return "CATALOG-DEFAULT"
+    return "CATALOG-DEFAULT"
+
+
 def get_satellite_state(sat_id: str) -> dict[str, Any]:
+    """Best-estimate state: mock fuel registry first, then SGP4 from the SQLite catalog TLE."""
     sat = SATELLITES.get(sat_id)
-    if sat is None:
-        return {"error": f"Unknown satellite: {sat_id}"}
-    return sat
+    if sat is not None:
+        return sat
+    db = SessionLocal()
+    try:
+        srow = resolve_spacecraft_row(db, sat_id)
+        if srow is None:
+            return {
+                "error": f"Unknown satellite: {sat_id}",
+                "hint": (
+                    "Try get_operator_reference to see catalog_satellite_ids / mock_satellite_registry_ids; "
+                    "match by sat_id, NORAD digits, or a distinctive name substring."
+                ),
+            }
+        when = datetime.now(UTC)
+        try:
+            _, r_km, v_km_s = trajectory_states_sgp4(
+                srow.tle_line1, srow.tle_line2, [when],
+            )[0]
+        except Exception as exc:  # noqa: BLE001 — SGP4 may reject pathological TLEs
+            return {
+                "error": f"Could not propagate SGP4 for {srow.sat_id}: {exc}",
+                "sat_id": srow.sat_id,
+            }
+        const_id = _infer_constellation_id_from_row(srow)
+        return {
+            "sat_id": srow.sat_id,
+            "name": srow.name,
+            "norad_catalog_id": srow.norad_catalog_id,
+            "purpose": srow.purpose,
+            "constellation_id": const_id,
+            "fuel_kg": 100.0,
+            "fuel_note": (
+                "Catalog rows have no metered fuel state. 100.0 kg is a placeholder for "
+                "Tsiolkovsky/agent reasoning; use compute_fuel_from_tsiolkovsky to size Δv burns."
+            ),
+            "data_quality": "NOMINAL",
+            "last_updated_utc": srow.updated_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "epoch_utc": when.isoformat().replace("+00:00", "Z"),
+            "position_eci_km": [float(r_km[0]), float(r_km[1]), float(r_km[2])],
+            "velocity_eci_km_s": [float(v_km_s[0]), float(v_km_s[1]), float(v_km_s[2])],
+            "source": "CATALOG_TLE_SGP4",
+        }
+    finally:
+        db.close()
 
 
 def get_house_rules(constellation_id: str) -> dict[str, Any]:
+    """House rules for a constellation; falls back to CATALOG-DEFAULT with a note for unknown ids."""
     rules = HOUSE_RULES.get(constellation_id)
-    if rules is None:
-        return {"error": f"Unknown constellation: {constellation_id}"}
-    return rules
+    if rules is not None:
+        return {**rules, "match": "exact"}
+    fallback = HOUSE_RULES["CATALOG-DEFAULT"]
+    return {
+        **fallback,
+        "match": "fallback_catalog_default",
+        "requested_constellation_id": constellation_id,
+        "note": (
+            f"No specific house rules for constellation_id={constellation_id!r}. Returning "
+            "CATALOG-DEFAULT (catalog-wide defaults). For tighter limits, infer the constellation "
+            "from the satellite name/purpose (Starlink, Planet, Kuiper, Galileo, GPS, BeiDou) and "
+            "treat it as guidance rather than a contractual rule."
+        ),
+    }
 
 
 def compute_time_to_tca(conjunction_id: str, reference_utc: str | None = None) -> dict[str, Any]:
@@ -226,17 +301,35 @@ def compute_fuel_from_tsiolkovsky(
     g0_mps2: float = 9.80665,
 ) -> dict[str, Any]:
     """Propellant mass via Tsiolkovsky (ideal rocket); toy wet mass for order-of-magnitude demos."""
-    sat = SATELLITES.get(sat_id)
-    if sat is None:
-        return {"error": f"Unknown satellite: {sat_id}"}
+    sat_meta = SATELLITES.get(sat_id)
+    fuel_kg_initial: float
+    fuel_source: str
+    if sat_meta is not None:
+        fuel_kg_initial = float(sat_meta["fuel_kg"])
+        fuel_source = "mock_satellite_registry"
+    else:
+        db = SessionLocal()
+        try:
+            srow = resolve_spacecraft_row(db, sat_id)
+        finally:
+            db.close()
+        if srow is None:
+            return {
+                "error": f"Unknown satellite: {sat_id}",
+                "hint": (
+                    "No mock fuel registry entry and no catalog row matches. "
+                    "Use get_operator_reference to find catalog_satellite_ids."
+                ),
+            }
+        fuel_kg_initial = 100.0
+        fuel_source = "catalog_default_placeholder_100kg"
     ve = specific_impulse_s * g0_mps2
     if ve <= 0:
         return {"error": "Invalid exhaust velocity (Isp × g0)."}
-    # Toy wet mass for demo-scale propellant estimates.
     m0_effective_kg = 80.0
     fraction = 1.0 - math.exp(-delta_v_mps / ve)
     propellant_kg = m0_effective_kg * fraction
-    remaining_kg = float(sat["fuel_kg"]) - propellant_kg
+    remaining_kg = fuel_kg_initial - propellant_kg
     return {
         "sat_id": sat_id,
         "delta_v_mps": delta_v_mps,
@@ -244,7 +337,9 @@ def compute_fuel_from_tsiolkovsky(
         "effective_exhaust_velocity_mps": ve,
         "effective_initial_mass_kg": m0_effective_kg,
         "propellant_consumed_kg": propellant_kg,
+        "fuel_kg_initial": fuel_kg_initial,
         "fuel_remaining_after_kg": remaining_kg,
+        "fuel_source": fuel_source,
     }
 
 

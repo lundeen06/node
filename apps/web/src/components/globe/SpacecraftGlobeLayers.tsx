@@ -11,6 +11,7 @@ import type { KeplerFleetEntry } from "@/lib/orbit/keplerFleet";
 import { propagateKeplerEntryEciMeters } from "@/lib/orbit/keplerFleet";
 import {
   buildManeuverGroundTrack,
+  buildProposedAfterBurnTrack,
   positionEciMetersFromTrajectoryAt,
   trajectoryPathEciFromNow,
 } from "@/lib/orbit/maneuverPreviewViz";
@@ -78,7 +79,13 @@ function conjunctionMarkersForSim(
 }
 
 export function SpacecraftGlobeLayers() {
-  const { globe, selectedSatIds, conjunctionHits, maneuverPreviewConfig } = useOpsShell();
+  const {
+    globe,
+    selectedSatIds,
+    conjunctionHits,
+    maneuverPreviewConfig,
+    selectedConjunctionId,
+  } = useOpsShell();
   const previewActive = Boolean(maneuverPreviewConfig);
   const { getSimInstant } = useSimClock();
   const { loading: catalogLoading, error: catalogError, plottedEntries, entries } = useFleetCatalog();
@@ -102,10 +109,22 @@ export function SpacecraftGlobeLayers() {
 
   /** Latest trajectory samples for the previewing satellite (nominal SGP4 or propagated maneuver). */
   const previewTrajectoryRef = useRef<{ satId: string; traj: TrajectoryResponse } | null>(null);
+  /**
+   * Proposal-phase only: post-burn-propagated trajectory used to render the green "if accepted"
+   * overlay path and the green sphere at TCA. Cleared when the burn is approved (the approved
+   * trajectory is owned by ``previewTrajectoryRef``).
+   */
+  const proposedTrajectoryRef = useRef<{ satId: string; traj: TrajectoryResponse } | null>(null);
   const lastGroundTracksRef = useRef<GroundTrack[] | null>(null);
 
+  const selectedConjunctionIdRef = useRef<string | null>(null);
+  selectedConjunctionIdRef.current = selectedConjunctionId;
+
   useEffect(() => {
-    if (!maneuverPreviewConfig) previewTrajectoryRef.current = null;
+    if (!maneuverPreviewConfig) {
+      previewTrajectoryRef.current = null;
+      proposedTrajectoryRef.current = null;
+    }
   }, [maneuverPreviewConfig]);
 
   useEffect(() => {
@@ -202,6 +221,7 @@ export function SpacecraftGlobeLayers() {
     if (selectedSatIds.size === 0 && !maneuverPreviewConfig) {
       lastGroundTracksRef.current = null;
       globe.setGroundTracks(null);
+      globe.setProposedAfterBurnMarker(null);
       return;
     }
     let cancelled = false;
@@ -231,31 +251,76 @@ export function SpacecraftGlobeLayers() {
             const anchorMs = Number.isFinite(startMs) ? startMs : simMs;
             const baseSpanMs = effectiveManeuverTimelineWindowMs(preview, anchorMs);
             const coverToNowMs = Math.max(0, simMs - anchorMs) + 45 * 60 * 1000;
-            const spanMs = Math.max(baseSpanMs, coverToNowMs);
+            // Stretch the window to comfortably cover TCA so the green post-burn overlay extends
+            // past the predicted close-approach time (selected conjunction context).
+            let coverToTcaMs = 0;
+            if (!burnedIn) {
+              const cid = selectedConjunctionIdRef.current;
+              const ev = cid ? conjunctionHitsRef.current.find((e) => e.id === cid) : undefined;
+              const tcaMs = ev ? Date.parse(ev.tca_utc) : NaN;
+              if (Number.isFinite(tcaMs)) {
+                coverToTcaMs = Math.max(0, (tcaMs as number) - anchorMs) + 30 * 60 * 1000;
+              }
+            }
+            const spanMs = Math.max(baseSpanMs, coverToNowMs, coverToTcaMs);
             const durationMinutes = Math.min(24 * 60, Math.max(95, Math.ceil(spanMs / 60000)));
             const stepSeconds = maneuverPreviewStepSeconds(preview, anchorMs);
-            const traj = burnedIn
-              ? await postTrajectoryPreviewManeuvers(id, {
+            const burnsBody = preview.maneuvers.map((m) => ({
+              epoch_utc: m.epoch_utc,
+              delta_v_mps: m.delta_v_mps,
+              frame: m.frame || "ECI",
+            }));
+            if (burnedIn) {
+              const traj = await postTrajectoryPreviewManeuvers(id, {
+                start_utc: startIso,
+                duration_minutes: durationMinutes,
+                step_seconds: stepSeconds,
+                maneuvers: burnsBody,
+              });
+              if (!cancelled) {
+                previewTrajectoryRef.current = { satId: id, traj };
+                proposedTrajectoryRef.current = null;
+              }
+              const maneuverTrack = buildManeuverGroundTrack(id, traj, preview.maneuvers, {
+                simNowUtc: getSimInstant(),
+                pathStyle: "burn_split",
+              });
+              if (maneuverTrack) tracks.push(maneuverTrack);
+            } else {
+              // Proposal phase: render the current SGP4 path AND a green post-burn overlay so the
+              // operator can compare "current trajectory until collision" with the adjusted orbit.
+              const [nominalTraj, propagatedTraj] = await Promise.all([
+                fetchSpacecraftTrajectory(id, {
                   start_utc: startIso,
                   duration_minutes: durationMinutes,
                   step_seconds: stepSeconds,
-                  maneuvers: preview.maneuvers.map((m) => ({
-                    epoch_utc: m.epoch_utc,
-                    delta_v_mps: m.delta_v_mps,
-                    frame: m.frame || "ECI",
-                  })),
-                })
-              : await fetchSpacecraftTrajectory(id, {
+                }),
+                postTrajectoryPreviewManeuvers(id, {
                   start_utc: startIso,
                   duration_minutes: durationMinutes,
                   step_seconds: stepSeconds,
-                });
-            if (!cancelled) previewTrajectoryRef.current = { satId: id, traj };
-            const maneuverTrack = buildManeuverGroundTrack(id, traj, preview.maneuvers, {
-              simNowUtc: getSimInstant(),
-              pathStyle: burnedIn ? "burn_split" : "nominal_single",
-            });
-            if (maneuverTrack) tracks.push(maneuverTrack);
+                  maneuvers: burnsBody,
+                }),
+              ]);
+              if (!cancelled) {
+                previewTrajectoryRef.current = { satId: id, traj: nominalTraj };
+                proposedTrajectoryRef.current = { satId: id, traj: propagatedTraj };
+              }
+              const nominalTrack = buildManeuverGroundTrack(id, nominalTraj, preview.maneuvers, {
+                simNowUtc: getSimInstant(),
+                pathStyle: "nominal_single",
+              });
+              if (nominalTrack) tracks.push(nominalTrack);
+              const firstBurnMs = preview.maneuvers
+                .map((m) => Date.parse(m.epoch_utc))
+                .filter((t) => Number.isFinite(t))
+                .sort((a, b) => a - b)[0];
+              const proposedTrack = buildProposedAfterBurnTrack(id, propagatedTraj, {
+                simNowUtc: getSimInstant(),
+                firstBurnUtc: Number.isFinite(firstBurnMs) ? new Date(firstBurnMs as number) : undefined,
+              });
+              if (proposedTrack) tracks.push(proposedTrack);
+            }
           } else {
             const traj = await fetchSpacecraftTrajectory(id, {
               start_utc: sim.toISOString(),
@@ -271,12 +336,36 @@ export function SpacecraftGlobeLayers() {
             if (!cancelled && previewTrajectoryRef.current?.satId === id) {
               previewTrajectoryRef.current = null;
             }
+            if (!cancelled && proposedTrajectoryRef.current?.satId === id) {
+              proposedTrajectoryRef.current = null;
+            }
           }
         }
       }
       if (!cancelled) {
         lastGroundTracksRef.current = tracks.length > 0 ? tracks : null;
         g.setGroundTracks(tracks.length > 0 ? tracks : null);
+
+        // Place / clear the green "post-burn at TCA" sphere.
+        const cfg = maneuverPreviewRef.current;
+        const proposed = proposedTrajectoryRef.current;
+        if (cfg && !cfg.burnApplied && proposed && proposed.satId === cfg.satId) {
+          const cid = selectedConjunctionIdRef.current;
+          const ev = cid ? conjunctionHitsRef.current.find((e) => e.id === cid) : undefined;
+          const tcaMs = ev ? Date.parse(ev.tca_utc) : NaN;
+          if (Number.isFinite(tcaMs)) {
+            const eciM = positionEciMetersFromTrajectoryAt(proposed.traj, new Date(tcaMs as number));
+            if (eciM) {
+              g.setProposedAfterBurnMarker({ satId: cfg.satId, eciM });
+            } else {
+              g.setProposedAfterBurnMarker(null);
+            }
+          } else {
+            g.setProposedAfterBurnMarker(null);
+          }
+        } else {
+          g.setProposedAfterBurnMarker(null);
+        }
       }
     }
 
