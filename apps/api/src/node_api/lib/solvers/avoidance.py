@@ -85,9 +85,19 @@ def _solve_impulsive_avoidance_with_lead(
     maneuver_epoch = Epoch(instant=dep_instant.astimezone(UTC), scale=TimeScale.UTC)
     arrival_epoch = threat.tca
 
-    departure = ego.state_vector.model_copy(update={"epoch": maneuver_epoch})
-    r0 = np.asarray(departure.position_km.data, dtype=np.float64).reshape(3)
-    v0 = np.asarray(departure.velocity_km_s.data, dtype=np.float64).reshape(3)
+    # Propagate ego to the chosen burn epoch before solving Lambert so departure
+    # state and departure time are physically consistent.
+    r_now = np.asarray(ego.state_vector.position_km.data, dtype=np.float64).reshape(3)
+    v_now = np.asarray(ego.state_vector.velocity_km_s.data, dtype=np.float64).reshape(3)
+    dt_to_burn_s = (maneuver_epoch.as_utc_datetime() - ego.state_vector.epoch.as_utc_datetime()).total_seconds()
+    r0, v0 = _propagate_two_body_cartesian_km(r_now, v_now, dt_to_burn_s)
+    departure = ego.state_vector.model_copy(
+        update={
+            "position_km": Vector3(data=r0),
+            "velocity_km_s": Vector3(data=v0),
+            "epoch": maneuver_epoch,
+        },
+    )
 
     dt_s = (arrival_epoch.as_utc_datetime() - maneuver_epoch.as_utc_datetime()).total_seconds()
     r_tc_km, v_tc_km_s = _propagate_two_body_cartesian_km(r0, v0, dt_s)
