@@ -97,10 +97,18 @@ def _solve_impulsive_avoidance_with_lead(
 
     t_tca = threat.tca.as_utc_datetime()
     t_ego = ego.state_vector.epoch.as_utc_datetime()
-    t_preferred_burn = t_tca - timedelta(seconds=float(burn_lead_s))
+    # Lambert needs strictly positive time-of-flight; allow "immediate" burns (lead 0) with a 1 ms coast.
+    min_tof_s = 1e-3
+    lead_s = float(burn_lead_s)
+    eff_lead_s = min_tof_s if lead_s <= 0.0 else max(lead_s, min_tof_s)
+    t_preferred_burn = t_tca - timedelta(seconds=eff_lead_s)
     dep_instant = max(t_ego, t_preferred_burn)
-    if dep_instant >= t_tca - timedelta(seconds=16.0):
-        msg = "Insufficient time before TCA for a Lambert avoidance leg."
+    tof_remaining_s = (t_tca - dep_instant).total_seconds()
+    if tof_remaining_s < min_tof_s:
+        msg = (
+            f"Insufficient time before TCA for a Lambert leg (need > {min_tof_s:g} s coast; "
+            f"got {tof_remaining_s:g} s)."
+        )
         raise InfeasibleProblemError(msg)
 
     maneuver_epoch = Epoch(instant=dep_instant.astimezone(UTC), scale=TimeScale.UTC)
@@ -185,8 +193,10 @@ def solve_impulsive_avoidance(
 ) -> ManeuverPlan:
     """Lambert single-impulse leg from a pre-TCA burn to an out-of-plane miss at TCA.
 
-    Departure epoch is ``max(ego.state_vector.epoch, TCA − burn_lead_s)`` with the same
-    Cartesian PV as ``ego`` (no fit-to-epoch propagation before the burn). Nominal TCA
+    Departure epoch is ``max(ego.state_vector.epoch, TCA − effective_lead)`` where
+    ``effective_lead`` is ``burn_lead_s`` (minimum 1 ms) or, when ``burn_lead_s <= 0``,
+    a 1 ms coast so Lambert has positive time-of-flight. Cartesian PV at departure uses
+    two-body propagation from ``ego`` unless TLE lines are passed. Nominal TCA
     location is a J2=0 two-body coast from that PV; the arrival target offsets that
     position along :math:`\\hat h` until total Δv fits ``max_delta_v_mps``.
     """
@@ -211,7 +221,7 @@ def solve_optimal_avoidance_timing(
     tle_line2: str | None = None,
 ) -> ManeuverPlan:
     """Try several pre-TCA burn leads; return the feasible plan with lowest total Δv."""
-    leads = (300.0, 600.0, 1200.0, 2400.0, 4800.0)
+    leads = (0.0, 60.0, 300.0, 600.0, 1200.0, 2400.0, 4800.0)
     best: ManeuverPlan | None = None
     last_err: InfeasibleProblemError | None = None
     for lead in leads:
@@ -239,6 +249,6 @@ def solve_optimal_avoidance_timing(
     note = ValidationOutcome(
         check_id="timing_search",
         passed=True,
-        message="Chose burn lead among {300,600,1200,2400,4800}s before TCA with minimum total Δv.",
+        message="Chose burn lead among {0,60,300,600,1200,2400,4800}s before TCA (0 = immediate) with minimum total Δv.",
     )
     return best.model_copy(update={"validation_results": [*best.validation_results, note]})

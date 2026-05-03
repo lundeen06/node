@@ -2,51 +2,40 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
-_BURN_MARGIN = timedelta(seconds=1.0)
-_CHECK_ID = "BURN_EPOCH_NOT_IN_PAST"
+_CHECK_ID = "BURN_EPOCH_TIMING_RELAXED"
 
 
 def burn_epoch_future_validation_row(
     maneuvers: list[dict[str, Any]],
     not_before: datetime,
 ) -> dict[str, Any]:
-    """Return one validation dict: passed iff every maneuver epoch parses and is >= ``not_before`` (minus margin)."""
-    threshold = not_before.astimezone(UTC) - _BURN_MARGIN
+    """Parse maneuver epochs only; do not fail on wall-clock vs burn time (sim / immediate burns)."""
     for i, m in enumerate(maneuvers):
         es = m.get("epoch_utc")
         try:
-            ep = datetime.fromisoformat(str(es).replace("Z", "+00:00")).astimezone(UTC)
+            datetime.fromisoformat(str(es).replace("Z", "+00:00")).astimezone(UTC)
         except (ValueError, TypeError, AttributeError):
             return {
                 "passed": False,
                 "check_id": "BURN_EPOCH_PARSE",
                 "message": f"Burn {i + 1}: invalid or missing epoch_utc.",
             }
-        if ep < threshold:
-            ref_s = not_before.astimezone(UTC).isoformat().replace("+00:00", "Z")
-            return {
-                "passed": False,
-                "check_id": _CHECK_ID,
-                "message": (
-                    f"Burn {i + 1} at {es!r} is before the planning reference UTC ({ref_s}); "
-                    "maneuvers must not be in the past."
-                ),
-            }
     ref_s = not_before.astimezone(UTC).isoformat().replace("+00:00", "Z")
     return {
         "passed": True,
         "check_id": _CHECK_ID,
         "message": (
-            f"All maneuver epochs are at or after the planning reference ({ref_s}, 1 s tolerance)."
+            f"Maneuver epoch(s) parse as UTC. Burn timing is not rejected vs server reference ({ref_s}); "
+            "operator/sim clock governs feasibility."
         ),
     }
 
 
 def plan_dict_validation_passed(plan: dict[str, Any], *, not_before: datetime | None = None) -> bool:
-    """True only if every wire ``validation`` entry passes and all burns are not before ``not_before``."""
+    """True if every wire ``validation`` entry passes and all maneuver ``epoch_utc`` values parse as UTC."""
     ref = (not_before or datetime.now(UTC)).astimezone(UTC)
     raw = list(plan.get("validation") or [])
     solver_ok = all(bool(v.get("passed")) for v in raw) if raw else True
