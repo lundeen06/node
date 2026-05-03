@@ -11,6 +11,8 @@ export const MANEUVER_LEG_FINAL = 0x2dd4bf;
 export const MANEUVER_BURN_ARROW_0 = 0xfb7185;
 /** Δv arrow — second burn (violet). */
 export const MANEUVER_BURN_ARROW_1 = 0xc084fc;
+/** Proposed post-burn orbit overlay (green-500): "what the trajectory would be if accepted". */
+export const MANEUVER_PROPOSED_PATH = 0x22c55e;
 
 type Sample = { t: number; p: [number, number, number] };
 
@@ -242,4 +244,38 @@ export function buildManeuverGroundTrack(
   }
 
   return { satId, segments, burns };
+}
+
+/**
+ * Green "proposed" overlay path drawn from the propagated trajectory (post-burn).
+ *
+ * The path is clipped to start at the **first burn epoch** when one is provided (so the green
+ * overlay doesn't overdraw the nominal pre-burn arc), or at ``simNowUtc`` otherwise.
+ *
+ * Uses ``GroundTrack.path`` + ``pathColor`` (single color line). ``satId`` is suffixed with
+ * ``__proposed`` so the renderer pool keys don't collide with the nominal track; ``pickSatId``
+ * routes picking back to the real satellite id.
+ */
+export function buildProposedAfterBurnTrack(
+  satId: string,
+  propagatedTraj: TrajectoryResponse,
+  opts?: { simNowUtc?: Date; firstBurnUtc?: Date },
+): GroundTrack | null {
+  const samples = parseSamples(propagatedTraj);
+  if (samples.length < 2) return null;
+  const burnMs = opts?.firstBurnUtc?.getTime();
+  const simMs = opts?.simNowUtc?.getTime();
+  const startMs = Number.isFinite(burnMs)
+    ? (burnMs as number)
+    : Number.isFinite(simMs)
+      ? (simMs as number)
+      : samples[0]!.t;
+  const clipped = clipSamplesToFuture(samples, startMs);
+  if (clipped.length < 2) return null;
+  return {
+    satId: `${satId}__proposed`,
+    pickSatId: satId,
+    path: clipped.map((s) => s.p),
+    pathColor: MANEUVER_PROPOSED_PATH,
+  };
 }

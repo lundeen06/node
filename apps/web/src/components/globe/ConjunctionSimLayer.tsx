@@ -41,7 +41,7 @@ export function ConjunctionSimLayer() {
         sim_utc: sim.toISOString(),
         max_satellites: 72,
         separation_prefilter_km: 2800,
-        sphere_radius_km: 12,
+        sphere_radius_km: 10,
         step_s: 120,
         search_max_orbits: 2,
         ...maneuverScreenPayload,

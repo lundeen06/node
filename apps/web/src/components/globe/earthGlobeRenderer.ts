@@ -42,6 +42,10 @@ export type GroundTrack = {
   /** Maneuver preview legs (initial / transfer / final). */
   segments?: GroundTrackSegment[];
   burns?: GroundTrackBurnArrow[];
+  /** Override the cycling palette for ``path`` style — e.g. green proposed-after-burn overlay. */
+  pathColor?: number;
+  /** Picking returns this id when set (lets a synthetic ``satId`` like ``X__proposed`` map to ``X``). */
+  pickSatId?: string;
 };
 
 /** Close approach: midpoint at TCA plus optional primary/secondary SGP4 positions (meters). */
@@ -560,8 +564,8 @@ export function attachEarthGlobe(container: HTMLElement, options?: EarthGlobeOpt
         } else if (t.path && t.path.length >= 2) {
           wantedTracks.add(t.satId);
           const path = downsamplePath(t.path, MAX_TRACK_POINTS);
-          const entry = ensureTrack(t.satId, trackColorFor(i));
-          entry.line.userData = { satId: t.satId };
+          const entry = ensureTrack(t.satId, t.pathColor ?? trackColorFor(i));
+          entry.line.userData = { satId: t.pickSatId ?? t.satId };
           const n = path.length;
           for (let j = 0; j < n; j++) {
             eciMetersToSceneVector3(path[j]!, vScratch);

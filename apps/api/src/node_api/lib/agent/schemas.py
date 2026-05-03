@@ -60,8 +60,11 @@ _AGENT_TOOL_SPECS: list[dict[str, object]] = [
     {
         "name": "get_satellite_state",
         "description": (
-            "Get the current best-estimate state for a satellite: fuel remaining, "
-            "data quality, and last update time."
+            "Best-estimate state for a satellite. Tries the mock fuel registry first; if absent, "
+            "falls back to the SQLite catalog row and returns SGP4 ECI position/velocity at server UTC, "
+            "an inferred constellation_id (Starlink/Kuiper/Planet/Galileo/GPS/BeiDou or CATALOG-DEFAULT), "
+            "and a 100 kg fuel placeholder so downstream tools (Tsiolkovsky, avoidance) can still run. "
+            "Resolves by sat_id, NORAD digits, or distinctive name substring."
         ),
         "input_schema": {
             "type": "object",
@@ -72,8 +75,9 @@ _AGENT_TOOL_SPECS: list[dict[str, object]] = [
     {
         "name": "get_house_rules",
         "description": (
-            "Get operational house rules for a constellation: Pc mitigation threshold and "
-            "max auto-execute delta-v limit."
+            "Operational house rules for a constellation: Pc mitigation threshold and max auto-execute "
+            "delta-v limit. Unknown constellation_id returns CATALOG-DEFAULT with a note (never a hard "
+            "error) — quote the note in your reply when you fall back."
         ),
         "input_schema": {
             "type": "object",
