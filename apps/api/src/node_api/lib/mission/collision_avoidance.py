@@ -1,11 +1,25 @@
-"""Collision avoidance mission recipes (stubs)."""
+"""Collision avoidance mission recipes — Lambert-backed impulsive planning."""
 
 from __future__ import annotations
 
-from node_api.types.conjunction import Conjunction
+from node_api.lib.solvers.avoidance import solve_optimal_avoidance_timing
+from node_api.types.conjunction import CloseApproach, Conjunction
 from node_api.types.constellation import HouseRules
 from node_api.types.maneuver import ManeuverPlan
 from node_api.types.satellite import SatelliteState
+
+
+def _close_approach_from_conjunction(event: Conjunction) -> CloseApproach:
+    return CloseApproach(
+        id=event.id,
+        primary_id=event.primary_id,
+        secondary_id=event.secondary_id,
+        tca=event.tca,
+        miss_distance_km=event.miss_distance_km,
+        relative_velocity_km_s=event.relative_velocity_km_s,
+        source=event.source,
+        created_at=event.created_at,
+    )
 
 
 def plan_collision_avoidance(
@@ -13,24 +27,11 @@ def plan_collision_avoidance(
     event: Conjunction,
     house_rules: HouseRules,
 ) -> ManeuverPlan:
-    """Orchestrate screening, timing search, and impulsive avoidance for a conjunction.
+    """Build a Lambert single-impulse avoidance plan bounded by ``HouseRules.max_auto_delta_v_mps``.
 
-    Purpose:
-        End-to-end mitigation planning with policy thresholds from ``HouseRules``.
-
-    When to use:
-        After internal screening or CDM ingestion flags ``event.status == NEW``.
-
-    Prerequisites:
-        ``compute_pc`` already reflected in ``event``; covariance current in ``ego``.
-
-    Post-checks:
-        ``check_induced_conjunctions``, ``check_keep_out_compliance``, ``check_fuel_compliance``.
-
-    Returns:
-        Executable ``ManeuverPlan`` pending operator approval.
-
-    Raises:
-        InfeasibleProblemError: If mitigation is impossible within fuel/thrust limits.
+    Maps ``event`` to a :class:`CloseApproach` for :func:`solve_optimal_avoidance_timing` (several
+    pre-TCA burn leads, minimum total Δv) and uses ``house_rules.pc_mitigation_threshold`` as the Pc
+    policy gate in metadata (post-maneuver Pc is not recomputed in this version).
     """
-    raise NotImplementedError
+    threat = _close_approach_from_conjunction(event)
+    return solve_optimal_avoidance_timing(ego, threat, house_rules)

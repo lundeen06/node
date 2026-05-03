@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+import numpy as np
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from node_api.lib.ingress.space_track import fetch_cdm, fetch_tle
 from node_api.lib.pair_conjunction_keplerian import (
     KeplerianPairKeepoutResult,
     screen_pair_keplerian_keepout,
 )
+from node_api.db.session import get_session
 from node_api.lib.pair_conjunction_sgp4 import screen_pair_sphere_sgp4
+from node_api.services.catalog_conjunction_screen import screen_catalog_close_approaches
+from node_api.services.conjunction_store import replace_catalog_conjunction_snapshot
 from node_api.types.state import KeplerianElements
 from node_api.types.time import Epoch, TimeScale
 
@@ -98,6 +103,65 @@ class KeplerianPairKeepoutResponse(BaseModel):
     )
 
 
+class CatalogScreenManeuverBurnIn(BaseModel):
+    """ECI Δv burn for optional catalog-screen refinement (same physics as trajectory-preview)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    epoch_utc: datetime
+    delta_v_mps: dict[str, float]
+    frame: str = "ECI"
+
+
+class CatalogScreenRequest(BaseModel):
+    """Screen catalog pairs near ``sim_utc`` (demo / ops visualization)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sim_utc: datetime = Field(..., description="Simulation epoch for screening (timezone-aware UTC).")
+    separation_prefilter_km: float = Field(default=4000.0, gt=0, le=50_000.0)
+    max_satellites: int = Field(default=80, ge=2, le=500)
+    max_candidate_pairs: int = Field(default=2500, ge=1, le=50_000)
+    sphere_radius_km: float = Field(default=15.0, gt=0, le=500.0)
+    step_s: float = Field(default=90.0, gt=1, le=600.0)
+    search_max_orbits: int = Field(default=2, ge=1, le=30)
+    maneuver_preview_sat_id: str | None = Field(
+        default=None,
+        description="If set with maneuvers, re-evaluate hits involving this sat at TCA using preview trajectory.",
+    )
+    maneuver_preview_maneuvers: list[CatalogScreenManeuverBurnIn] | None = Field(
+        default=None,
+        description="ECI-frame impulsive burns; catalog TLEs are not updated.",
+    )
+
+    @model_validator(mode="after")
+    def _maneuver_preview_consistency(self) -> CatalogScreenRequest:
+        sat = self.maneuver_preview_sat_id
+        mans = self.maneuver_preview_maneuvers
+        if mans and not (sat and sat.strip()):
+            msg = "maneuver_preview_maneuvers requires maneuver_preview_sat_id."
+            raise ValueError(msg)
+        return self
+
+
+class CatalogScreenEventOut(BaseModel):
+    id: str
+    primary_sat_id: str
+    secondary_sat_id: str
+    tca_utc: str
+    miss_distance_km: float
+    pc_heuristic: float
+    sphere_radius_km: float
+    eci_mid_m: list[float] = Field(..., min_length=3, max_length=3)
+    primary_eci_m: list[float] = Field(..., min_length=3, max_length=3)
+    secondary_eci_m: list[float] = Field(..., min_length=3, max_length=3)
+
+
+class CatalogScreenResponse(BaseModel):
+    sim_utc: str
+    events: list[CatalogScreenEventOut]
+
+
 class PairSphereScreenResponse(BaseModel):
     conjunction_occurred: bool
     conjunction_probability_heuristic: float = Field(..., ge=0, le=1)
@@ -119,13 +183,72 @@ class PairSphereScreenResponse(BaseModel):
     )
 
 
+@router.post("/catalog-screen", response_model=CatalogScreenResponse)
+def catalog_screen(
+    body: CatalogScreenRequest,
+    session: Session = Depends(get_session),
+) -> CatalogScreenResponse:
+    """SGP4 pairwise screening across a catalog subset (prefilter + keep-out sphere)."""
+    if body.sim_utc.tzinfo is None:
+        raise HTTPException(status_code=400, detail="sim_utc must be timezone-aware.")
+    sim = body.sim_utc.astimezone(UTC)
+    maneuver_preview: tuple[str, list[tuple[datetime, np.ndarray]]] | None = None
+    if body.maneuver_preview_sat_id and body.maneuver_preview_maneuvers:
+        sid = body.maneuver_preview_sat_id.strip()
+        burns: list[tuple[datetime, np.ndarray]] = []
+        for m in body.maneuver_preview_maneuvers:
+            if str(m.frame).upper() != "ECI":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Catalog maneuver preview supports ECI-frame burns only.",
+                )
+            dv = m.delta_v_mps
+            arr = np.array(
+                [float(dv["x"]), float(dv["y"]), float(dv["z"])],
+                dtype=np.float64,
+            )
+            burns.append((m.epoch_utc.astimezone(UTC), arr))
+        if burns:
+            maneuver_preview = (sid, burns)
+    raw = screen_catalog_close_approaches(
+        session,
+        sim_utc=sim,
+        separation_prefilter_km=body.separation_prefilter_km,
+        max_satellites=body.max_satellites,
+        max_candidate_pairs=body.max_candidate_pairs,
+        sphere_radius_km=body.sphere_radius_km,
+        step_s=body.step_s,
+        search_max_orbits=body.search_max_orbits,
+        maneuver_preview=maneuver_preview,
+    )
+    replace_catalog_conjunction_snapshot(session, raw)
+    session.commit()
+    events = [
+        CatalogScreenEventOut(
+            id=e["id"],
+            primary_sat_id=e["primary_sat_id"],
+            secondary_sat_id=e["secondary_sat_id"],
+            tca_utc=e["tca_utc"],
+            miss_distance_km=e["miss_distance_km"],
+            pc_heuristic=e["pc_heuristic"],
+            sphere_radius_km=e["sphere_radius_km"],
+            eci_mid_m=e["eci_mid_m"],
+            primary_eci_m=e["primary_eci_m"],
+            secondary_eci_m=e["secondary_eci_m"],
+        )
+        for e in raw
+    ]
+    return CatalogScreenResponse(sim_utc=sim.isoformat(), events=events)
+
+
 @router.get("/")
 async def list_conjunctions() -> dict[str, str]:
     _ = _LIB_SURFACE
     return {
         "detail": (
-            "POST /conjunctions/pair-screen (TLE+SGP4) or "
-            "POST /conjunctions/keplerian/pair-screen (classical elements + mean propagation)."
+            "POST /conjunctions/catalog-screen (subset SGP4 sweep) · "
+            "POST /conjunctions/pair-screen (TLE+SGP4) · "
+            "POST /conjunctions/keplerian/pair-screen (mean elements)."
         )
     }
 

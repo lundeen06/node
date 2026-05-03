@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from node_api.config import settings
 from node_api.lib.agent.prompts import SYSTEM_PROMPT
-from node_api.lib.agent.schemas import AGENT_TOOLS
+from node_api.lib.agent.schemas import OPENAI_CHAT_TOOLS
 from node_api.lib.agent.tools import TOOL_REGISTRY
 
 # ---------------------------------------------------------------------------
@@ -28,6 +28,20 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class ConjunctionContextWire(BaseModel):
+    """Optional conjunction the operator focused in the UI (epoch + pair from live screening)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conjunction_id: str | None = None
+    primary_sat_id: str | None = None
+    secondary_sat_id: str | None = None
+    tca_utc: str | None = None
+    miss_distance_km: float | None = None
+    pc_heuristic: float | None = None
+    source: str | None = None
+
+
 class AgentTurnRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -37,6 +51,10 @@ class AgentTurnRequest(BaseModel):
     focus_sat_id: str | None = Field(
         default=None,
         description="Optional spacecraft context for tool routing.",
+    )
+    conjunction_context: ConjunctionContextWire | None = Field(
+        default=None,
+        description="Screening event selected in the ops UI (TCA and pair IDs for this turn).",
     )
 
 
@@ -90,7 +108,29 @@ def _execute_tool(name: str, arguments_json: str) -> dict[str, Any]:
     fn = TOOL_REGISTRY.get(name)
     if fn is None:
         return {"error": f"Unknown tool: {name}"}
-    return fn(**inputs)
+    try:
+        return fn(**inputs)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _assistant_message_for_api(msg: Any) -> dict[str, Any]:
+    """Build assistant history dict without SDK-only keys (avoids OpenAI 400 on follow-up turns)."""
+    out: dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+    tool_calls = getattr(msg, "tool_calls", None)
+    if tool_calls:
+        serialized: list[dict[str, Any]] = []
+        for tc in tool_calls:
+            fn = tc.function
+            serialized.append(
+                {
+                    "id": tc.id,
+                    "type": getattr(tc, "type", None) or "function",
+                    "function": {"name": fn.name, "arguments": fn.arguments},
+                },
+            )
+        out["tool_calls"] = serialized
+    return out
 
 
 def _plan_dict_to_response(plan: dict[str, Any]) -> PlanResponse:
@@ -125,9 +165,37 @@ _MODEL = "gpt-4o"
 
 def run_agent_turn(request: AgentTurnRequest) -> AgentTurnResponse:
     """Drive the OpenAI function-calling loop until the model produces a final answer."""
-    client = openai.OpenAI(api_key=settings.openai_api_key or None)
+    api_key = (settings.openai_api_key or "").strip()
+    if not api_key:
+        raise ValueError(
+            "NODE_OPENAI_API_KEY is empty. Set it in apps/api/.env and restart uvicorn.",
+        )
+    client = openai.OpenAI(api_key=api_key)
 
-    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system_content = SYSTEM_PROMPT
+    if request.conjunction_context is not None:
+        cc = request.conjunction_context
+        lines: list[str] = []
+        if cc.conjunction_id:
+            lines.append(f"Conjunction ID: `{cc.conjunction_id}`")
+        if cc.primary_sat_id and cc.secondary_sat_id:
+            lines.append(f"Pair: `{cc.primary_sat_id}` vs `{cc.secondary_sat_id}`")
+        if cc.tca_utc:
+            lines.append(f"TCA (UTC): {cc.tca_utc}")
+        if cc.miss_distance_km is not None:
+            lines.append(f"Miss distance (km): {cc.miss_distance_km}")
+        if cc.pc_heuristic is not None:
+            lines.append(f"Screening Pc (heuristic): {cc.pc_heuristic}")
+        if cc.source:
+            lines.append(f"Data source: {cc.source}")
+        if lines:
+            system_content += (
+                "\n\nOperator-selected conjunction context (treat as authoritative for this turn; "
+                "still call get_active_conjunctions to reconcile with the latest persisted snapshot):\n"
+                + "\n".join(f"- {ln}" for ln in lines)
+            )
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_content}]
     for m in request.messages:
         if m.role != "system":
             messages.append({"role": m.role, "content": m.content})
@@ -136,17 +204,20 @@ def run_agent_turn(request: AgentTurnRequest) -> AgentTurnResponse:
     citations: list[str] = []
 
     for _ in range(_MAX_ROUNDS):
-        response = client.chat.completions.create(
-            model=_MODEL,
-            messages=cast(Any, messages),
-            tools=cast(Any, AGENT_TOOLS),
-            tool_choice="auto",
-        )
+        try:
+            response = client.chat.completions.create(
+                model=_MODEL,
+                messages=cast(Any, messages),
+                tools=cast(Any, OPENAI_CHAT_TOOLS),
+                tool_choice="auto",
+            )
+        except openai.APIError as exc:
+            raise RuntimeError(f"OpenAI API error: {exc}") from exc
 
         choice = response.choices[0]
         msg = choice.message
 
-        messages.append(msg.model_dump(exclude_none=True))
+        messages.append(_assistant_message_for_api(msg))
 
         if not msg.tool_calls:
             final_text = (msg.content or "").strip()
@@ -163,7 +234,7 @@ def run_agent_turn(request: AgentTurnRequest) -> AgentTurnResponse:
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": json.dumps(result),
-                }
+                },
             )
             if tool_call.function.name == "plan_collision_avoidance" and "plan" in result:
                 produced_plans.append(_plan_dict_to_response(cast(dict[str, Any], result["plan"])))

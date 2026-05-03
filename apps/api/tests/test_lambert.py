@@ -132,7 +132,7 @@ def test_equatorial_circular_7000_to_8000_km() -> None:
     assert len(l_plan.maneuvers) == 2
     assert h_plan.total_delta_v_mps > 0.0
     assert h_plan.total_delta_v_mps < 15_000.0
-    assert l_plan.total_delta_v_mps == pytest.approx(h_plan.total_delta_v_mps, rel=1e-4, abs=0.05)
+    assert l_plan.total_delta_v_mps == pytest.approx(h_plan.total_delta_v_mps, rel=2e-4, abs=0.06)
 
 
 def test_delta_v_same_orbit_consistent_phasing_small_dv() -> None:

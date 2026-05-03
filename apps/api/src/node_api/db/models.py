@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -27,3 +27,21 @@ class SpacecraftRow(Base):
     oe_vector_json: Mapped[str] = mapped_column(Text)
     ephemeris_epoch_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ConjunctionEventRow(Base):
+    """Latest catalog-screen close-approach events (SGP4 keep-out heuristic)."""
+
+    __tablename__ = "conjunction_event"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    primary_id: Mapped[str] = mapped_column(String(128), index=True)
+    secondary_id: Mapped[str] = mapped_column(String(128), index=True)
+    tca_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    miss_distance_km: Mapped[float] = mapped_column(Float)
+    relative_velocity_km_s: Mapped[float] = mapped_column(Float, default=0.0)
+    pc: Mapped[float] = mapped_column(Float)
+    pc_method: Mapped[str] = mapped_column(String(64), default="SCREEN_HEURISTIC")
+    source: Mapped[str] = mapped_column(String(64), default="CATALOG_SCREEN")
+    status: Mapped[str] = mapped_column(String(32), default="NEW")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -1,12 +1,14 @@
 """Pair conjunction screening using matched classical elements + mean-element propagation.
 
 Scenario: ego satellite equatorial circular ``a = 7000 km``; secondary differs only in
-semi-major axis. Same ``Ω, ω, i, e``, same mean anomaly at ``t₀``. Propagate both for
+semi-major axis (and optionally in inclination ``i`` only). Same ``Ω, ω, e``, same mean
+anomaly at ``t₀``. Propagate both for
 **five ego orbital periods** (two-body, ``J2 = 0``). Flag conjunction when range drops
 below **1 km** (keep-out sphere).
 
 With nearly equal semi-major axes, mean-motion drift is tiny over five orbits, so the
-pair stays almost **in phase**; range stays near ``|a_ext − a_ego|`` (km). For
+pair stays almost **in phase** when planes match; range stays near ``|a_ext − a_ego|`` (km)
+when inclinations align. For
 ``a_ext = 7000.01`` km that separation is 10 m ⇒ always inside a 1 km sphere; for
 ``7002`` km it is 2 km ⇒ never inside.
 """
@@ -36,6 +38,7 @@ def _scan_pair_min_distance_km(
     num_orbits: float,
     step_s: float,
     sphere_km: float,
+    inc_ext_rad: float = 0.0,
 ) -> tuple[bool, float, int, int, float]:
     """Return (conjunction_occurred, min_distance_km, samples_inside, total_samples, duration_s)."""
     mu = util_dyn.mu_E
@@ -45,9 +48,9 @@ def _scan_pair_min_distance_km(
     T = _ego_period_s(a0_m, mu)
     duration_s = num_orbits * T
 
-    # Equatorial; identical Ω, ω, M₀
+    # Ego equatorial; external matches Ω, ω, M₀ and e, a — only inclination may differ.
     oe_ego = np.array([a0_m, ecc, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
-    oe_ext = np.array([a1_m, ecc, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    oe_ext = np.array([a1_m, ecc, inc_ext_rad, 0.0, 0.0, 0.0], dtype=np.float64)
 
     min_d = float("inf")
     n_in = 0
@@ -71,17 +74,19 @@ def _scan_pair_min_distance_km(
 
 
 @pytest.mark.parametrize(
-    ("a_ext_km", "expect_conjunction"),
+    ("a_ext_km", "expect_conjunction", "inc_ext_rad"),
     [
-        (7002.0, False),
-        (7000.01, True),
+        (7002.0, False, 0.0),
+        (7000.01, True, 0.0),
+        (7000.01, True, math.radians(12.0)),
     ],
 )
 def test_equatorial_pair_five_orbits_keep_out_1km(
     a_ext_km: float,
     expect_conjunction: bool,
+    inc_ext_rad: float,
 ) -> None:
-    """7000 km ego vs 7002 km → stay outside 1 km; vs 7000.01 km → inside sphere."""
+    """7000 km ego vs 7002 km → stay outside 1 km; vs 7000.01 km → inside sphere (coplanar or inclined secondary)."""
     ecc = 1e-8
     a_ego_km = 7000.0
     conj, min_d, n_in, n_tot, dur = _scan_pair_min_distance_km(
@@ -91,13 +96,15 @@ def test_equatorial_pair_five_orbits_keep_out_1km(
         num_orbits=5.0,
         step_s=30.0,
         sphere_km=1.0,
+        inc_ext_rad=inc_ext_rad,
     )
 
     # Visible with: pytest tests/test_conjunction_keplerian_pairs.py -v -s
     print()
     print("=== Keplerian pair conjunction scan (mean elements, J2=0) ===")
     print(f"  ego a = {a_ego_km} km  |  other a = {a_ext_km} km  |  e = {ecc}")
-    print(f"  keep-out radius = 1.0 km")
+    print(f"  other i = {math.degrees(inc_ext_rad):.4g} deg (ego i = 0)")
+    print("  keep-out radius = 1.0 km")
     print(f"  window = 5 × ego period ≈ {dur:.1f} s")
     print(f"  samples: {n_tot}, step = 30 s")
     print(f"  minimum range = {min_d:.6f} km")

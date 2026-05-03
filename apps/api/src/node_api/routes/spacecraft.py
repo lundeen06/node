@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from node_api.errors import DataUnavailableError
 from node_api.lib.geodesy import eci_m_to_lon_lat_deg
 from node_api.lib.ingress.constellation_presets import PRESET_METADATA
 from node_api.lib.propagation import propagate_tle_sgp4_sample_times
+from node_api.lib.trajectory_maneuver_preview import trajectory_preview_maneuvers_m
 from node_api.services.spacecraft_catalog import (
     import_constellation_preset,
     register_and_fetch,
@@ -77,6 +79,23 @@ class TrajectoryOut(BaseModel):
 
     sat_id: str
     samples: list[TrajectorySampleOut]
+
+
+class ManeuverPreviewBurnIn(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    epoch_utc: datetime
+    delta_v_mps: dict[str, float]
+    frame: str = "ECI"
+
+
+class TrajectoryPreviewManeuversIn(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    start_utc: datetime
+    duration_minutes: float = Field(default=90.0, gt=0, le=24 * 60)
+    step_seconds: float = Field(default=90.0, gt=1, le=3600)
+    maneuvers: list[ManeuverPreviewBurnIn] = Field(..., min_length=1)
 
 
 class ConstellationPresetOut(BaseModel):
@@ -291,12 +310,16 @@ def spacecraft_trajectory(
     duration_minutes: Annotated[float, Query(gt=0, le=24 * 60)] = 90.0,
     step_seconds: Annotated[float, Query(gt=1, le=3600)] = 60.0,
     include_llh: Annotated[bool, Query(description="Include approximate lon/lat for map clients.")] = False,
+    start_utc: Annotated[
+        datetime | None,
+        Query(description="Optional trajectory start (UTC). Defaults to wall-clock now."),
+    ] = None,
 ) -> TrajectoryOut:
     """Propagate stored TLE lines with **SGP4** at each sample time (NORAD model)."""
     row = session.get(SpacecraftRow, sat_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Unknown spacecraft {sat_id!r}.")
-    now = datetime.now(tz=UTC)
+    now = (start_utc or datetime.now(tz=UTC)).astimezone(UTC)
     end = now + timedelta(minutes=duration_minutes)
     times: list[datetime] = []
     t = now
@@ -326,6 +349,60 @@ def spacecraft_trajectory(
             ),
         )
     return TrajectoryOut(sat_id=traj.sat_id, samples=samples)
+
+
+@router.post("/{sat_id}/trajectory-preview-maneuvers", response_model=TrajectoryOut)
+def spacecraft_trajectory_preview_maneuvers(
+    sat_id: str,
+    body: TrajectoryPreviewManeuversIn,
+    session: Session = Depends(get_session),
+) -> TrajectoryOut:
+    """SGP4 coast with impulsive ECI Δv at burn epochs (J2=0 mean-element propagation between burns)."""
+    row = session.get(SpacecraftRow, sat_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Unknown spacecraft {sat_id!r}.")
+    for m in body.maneuvers:
+        if str(m.frame).upper() != "ECI":
+            raise HTTPException(status_code=400, detail="Preview supports ECI-frame maneuvers only.")
+    start = body.start_utc.astimezone(UTC)
+    base_end = start + timedelta(minutes=float(body.duration_minutes))
+    # Impulses after ``base_end`` would never be applied (sample loop never reaches them), so
+    # stretch the preview window through the last burn plus a short post-burn coast (capped).
+    post_burn = timedelta(minutes=30.0)
+    max_span = timedelta(minutes=float(24 * 60))
+    last_burn = max((m.epoch_utc.astimezone(UTC) for m in body.maneuvers), default=start)
+    end = max(base_end, last_burn + post_burn)
+    end = min(end, start + max_span)
+    times: list[datetime] = []
+    t = start
+    while t <= end:
+        times.append(t)
+        t += timedelta(seconds=float(body.step_seconds))
+    if len(times) < 2:
+        times = [start, end]
+    burns: list[tuple[datetime, Any]] = []
+    for m in body.maneuvers:
+        dv = m.delta_v_mps
+        arr = np.array([float(dv["x"]), float(dv["y"]), float(dv["z"])], dtype=np.float64)
+        burns.append((m.epoch_utc.astimezone(UTC), arr))
+    try:
+        raw = trajectory_preview_maneuvers_m(row.tle_line1, row.tle_line2, times, burns)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DataUnavailableError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    samples: list[TrajectorySampleOut] = []
+    for tt, pos_m, vel_mps in raw:
+        samples.append(
+            TrajectorySampleOut(
+                epoch_utc=tt.isoformat(),
+                position_km=[float(x) / 1000.0 for x in pos_m.tolist()],
+                velocity_km_s=[float(x) / 1000.0 for x in vel_mps.tolist()],
+                lon_deg=None,
+                lat_deg=None,
+            ),
+        )
+    return TrajectoryOut(sat_id=row.sat_id, samples=samples)
 
 
 def _row_to_detail(row: SpacecraftRow) -> SpacecraftDetail:

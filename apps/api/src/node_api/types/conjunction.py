@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from node_api.compat_enum import StrEnum
-
 from pydantic import BaseModel, ConfigDict, Field
 
+from node_api.compat_enum import StrEnum
 from node_api.types.time import Epoch
 
 
@@ -16,6 +15,7 @@ class PcMethod(StrEnum):
     ALFANO = "ALFANO"
     CHAN = "CHAN"
     MONTE_CARLO = "MONTE_CARLO"
+    SCREEN_HEURISTIC = "SCREEN_HEURISTIC"
 
 
 class ConjunctionSource(StrEnum):
@@ -24,6 +24,7 @@ class ConjunctionSource(StrEnum):
     CDM = "CDM"
     INTERNAL_SCREENING = "INTERNAL_SCREENING"
     MANUAL = "MANUAL"
+    CATALOG_SCREEN = "CATALOG_SCREEN"
 
 
 class ConjunctionStatus(StrEnum):

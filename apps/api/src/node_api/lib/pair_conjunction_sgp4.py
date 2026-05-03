@@ -103,7 +103,7 @@ def screen_pair_sphere_sgp4(
     n_in = 0
     n_total = 0
     t = t0
-    while t < end_t - 1e-9:
+    while t < end_t:
         p_ego = _position_km(ego, t)
         p_ext = _position_km(ext, t)
         d = float(np.linalg.norm(p_ext - p_ego))

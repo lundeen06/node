@@ -1,7 +1,6 @@
-"""In-memory mock data registry for agent tools.
+"""In-memory mock data for agent tools where persistence is not yet wired.
 
-Keyed to match the frontend mock data (MOCK_SATELLITES, MOCK_CONJUNCTION, MOCK_AGENT_PLAN).
-Replace with real lib function calls once physics stubs are implemented.
+Conjunction events come from SQLite via catalog screening (see ``conjunction_store``).
 """
 
 from __future__ import annotations
@@ -32,63 +31,15 @@ SATELLITES: dict[str, dict[str, Any]] = {
     },
 }
 
-CONJUNCTIONS: dict[str, dict[str, Any]] = {
-    "CJX-2041": {
-        "id": "CJX-2041",
-        "primary_id": "EO-12",
-        "secondary_id": "DEB-49811",
-        "tca_utc": "2026-05-02T16:04:12Z",
-        "miss_distance_km": 0.62,
-        "relative_velocity_km_s": 14.8,
-        "pc": 2.3e-4,
-        "pc_method": "FOSTER",
-        "source": "CDM",
-        "status": "NEW",
-    },
-}
-
 HOUSE_RULES: dict[str, dict[str, Any]] = {
     "EO-CONSTELLATION": {
         "constellation_id": "EO-CONSTELLATION",
         "pc_mitigation_threshold": 1e-4,
-        "max_auto_delta_v_mps": 0.1,
+        "max_auto_delta_v_mps": 800.0,
     },
-}
-
-PLANS: dict[str, dict[str, Any]] = {
-    "CJX-2041": {
-        "plan_id": "plan-cjx-2041-001",
-        "sat_id": "EO-12",
-        "maneuvers": [
-            {
-                "epoch_utc": "2026-05-02T15:10:00Z",
-                "delta_v_mps": {"x": 0.052, "y": -0.011, "z": 0.004},
-                "frame": "RIC",
-                "duration_s": 8.0,
-            }
-        ],
-        "total_delta_v_mps": 0.054,
-        "objective": (
-            "Reduce Pc from 2.3e-4 to below 1e-4 with minimal in-track cost; "
-            "preserve ground contacts GS-12 and GS-04."
-        ),
-        "generated_by": "AGENT",
-        "validation": [
-            {
-                "check_id": "induced_conjunctions",
-                "passed": True,
-                "message": "No new close approaches introduced.",
-            },
-            {
-                "check_id": "fuel_compliance",
-                "passed": True,
-                "message": "0.054 m/s uses 0.002 kg; 12.3 kg reserve maintained.",
-            },
-            {
-                "check_id": "keep_out_compliance",
-                "passed": True,
-                "message": "Post-maneuver trajectory clears all keep-out zones.",
-            },
-        ],
+    "CATALOG-DEFAULT": {
+        "constellation_id": "CATALOG-DEFAULT",
+        "pc_mitigation_threshold": 1e-3,
+        "max_auto_delta_v_mps": 800.0,
     },
 }

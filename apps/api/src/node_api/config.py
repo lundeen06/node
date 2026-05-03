@@ -22,8 +22,11 @@ class Settings(BaseSettings):
     app_name: str = "node API"
     debug: bool = False
     cors_origins: str = Field(
-        default="http://localhost:3000",
-        description="Comma-separated list of allowed CORS origins.",
+        default=(
+            "http://localhost:3000,http://127.0.0.1:3000,"
+            "http://localhost:3001,http://127.0.0.1:3001"
+        ),
+        description="Comma-separated list of allowed CORS origins (include extra ports if Next picks them).",
     )
     openai_api_key: str = Field(
         default="",

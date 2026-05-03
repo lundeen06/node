@@ -10,13 +10,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from node_api.config import settings
 from node_api.db.models import Base
-from node_api.db.session import engine
+from node_api.db.session import SessionLocal, engine
 from node_api.routes import agent, conjunctions, maneuvers, satellites, spacecraft
+from node_api.services.conjunction_demo_pair_seed import ensure_demo_cross_plane_conjunction_pair
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as session:
+        ensure_demo_cross_plane_conjunction_pair(session)
     yield
 
 

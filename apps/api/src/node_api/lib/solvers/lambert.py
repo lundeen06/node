@@ -67,13 +67,29 @@ def _lambert_vallado(
     r0 = np.asarray(r0_m, dtype=np.float64).reshape(3)
     r = np.asarray(r_m, dtype=np.float64).reshape(3)
 
-    if np.linalg.norm(np.cross(r0, r)) < 1e-6 * np.linalg.norm(r0) * np.linalg.norm(r):
-        msg = "Lambert problem is undefined for collinear position vectors."
-        raise InfeasibleProblemError(msg)
+    norm_r0 = float(np.linalg.norm(r0))
+    norm_r = float(np.linalg.norm(r))
+    cross_r = np.cross(r0, r)
+    cross_norm = float(np.linalg.norm(cross_r))
+    colin_thresh = 1e-6 * norm_r0 * norm_r
+    if cross_norm < colin_thresh:
+        # True 180° in-plane transfers are singular; nudge arrival by ~10 m perpendicular
+        # to ``r0`` so the universal-variable formulation remains well-posed.
+        aux = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        orth = np.cross(r0, aux)
+        onorm = float(np.linalg.norm(orth))
+        if onorm < 1e-12 * max(norm_r0, 1.0):
+            orth = np.cross(r0, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+            onorm = float(np.linalg.norm(orth))
+        if onorm < 1e-30:
+            msg = "Lambert problem is undefined for collinear position vectors."
+            raise InfeasibleProblemError(msg)
+        orth = orth / onorm
+        bump_m = max(10.0, colin_thresh / max(norm_r, 1.0) * 1e3)
+        r = r + orth * bump_m
 
     t_m = 1.0 if prograde else -1.0
 
-    norm_r0 = float(np.linalg.norm(r0))
     norm_r = float(np.linalg.norm(r))
     norm_r0_times_norm_r = norm_r0 * norm_r
     norm_r0_plus_norm_r = norm_r0 + norm_r
@@ -196,7 +212,22 @@ def delta_v_between_keplerian_orbits(
     r1_m, v1_mps = keplerian_to_pv_m(departure_elements, mu)
     r2_m, v2_mps = keplerian_to_pv_m(arrival_elements, mu)
 
-    v1t_mps, v2t_mps = _lambert_vallado(r1_m, r2_m, tof_s, mu, prograde=prograde)
+    # Vallado short-way Lambert admits two ``prograde`` directions; total Δv can
+    # differ wildly (e.g. coast phasing vs the opposite branch). Take the cheaper.
+    candidates: list[tuple[float, NDArray[np.float64], NDArray[np.float64]]] = []
+    for pr in (prograde, not prograde):
+        try:
+            v1t, v2t = _lambert_vallado(r1_m, r2_m, tof_s, mu, prograde=pr)
+        except InfeasibleProblemError:
+            continue
+        dv1 = float(np.linalg.norm(v1t - v1_mps))
+        dv2 = float(np.linalg.norm(v2_mps - v2t))
+        candidates.append((dv1 + dv2, v1t, v2t))
+    if not candidates:
+        msg = "Lambert has no feasible branch for this chord and time of flight."
+        raise InfeasibleProblemError(msg)
+    candidates.sort(key=lambda c: c[0])
+    _best_dv, v1t_mps, v2t_mps = candidates[0]
 
     dv1_mps = v1t_mps - v1_mps
     dv2_mps = v2_mps - v2t_mps

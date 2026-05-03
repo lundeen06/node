@@ -66,19 +66,30 @@ def register_and_fetch(session: Session, sat_id: str, name: str, norad_catalog_i
     )
 
 
+def _is_synthetic_demo_row(row: SpacecraftRow) -> bool:
+    try:
+        gp = json.loads(row.gp_snapshot_json)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return bool(gp.get("synthetic_demo_tle"))
+
+
 def sync_all_registered(session: Session) -> int:
     """Refresh GP snapshots for every spacecraft in the database."""
     rows = list(session.scalars(select(SpacecraftRow)))
     if not rows:
         return 0
-    norad_ids = [r.norad_catalog_id for r in rows]
+    syncable = [r for r in rows if not _is_synthetic_demo_row(r)]
+    if not syncable:
+        return 0
+    norad_ids = [r.norad_catalog_id for r in syncable]
     gps = fetch_gp_rows(norad_ids)
     by_norad: dict[int, dict[str, Any]] = {}
     for gp in gps:
         raw = gp.get("NORAD_CAT_ID")
         by_norad[int(str(raw).strip())] = gp
     count = 0
-    for row in rows:
+    for row in syncable:
         gp = by_norad[row.norad_catalog_id]
         upsert_spacecraft_from_gp(
             session,

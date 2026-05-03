@@ -7,28 +7,92 @@ Returns plain dicts (JSON-serializable) to be fed back to Claude as tool results
 from __future__ import annotations
 
 import math
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from node_api.lib.agent.mock_store import CONJUNCTIONS, HOUSE_RULES, PLANS, SATELLITES
+import numpy as np
+from sqlalchemy import select
+
+from node_api.db.models import ConjunctionEventRow, SpacecraftRow
+from node_api.db.session import SessionLocal
+from node_api.errors import InfeasibleProblemError
+from node_api.lib.agent.mock_store import HOUSE_RULES, SATELLITES
+from node_api.lib.ingress.constellation_presets import list_preset_ids
+from node_api.lib.mission.collision_avoidance import plan_collision_avoidance as run_lambert_plan
+from node_api.lib.tle_physics import trajectory_states_sgp4
+from node_api.services.conjunction_store import (
+    get_conjunction_by_id,
+    list_active_conjunctions_for_sat,
+    list_all_active_conjunctions,
+)
+from node_api.types.common import Matrix6x6, Vector3
+from node_api.types.conjunction import Conjunction, ConjunctionSource, ConjunctionStatus, PcMethod
+from node_api.types.constellation import HouseRules
+from node_api.types.frames import Frame
+from node_api.types.maneuver import ManeuverPlan
+from node_api.types.satellite import DataQuality, SatelliteState
+from node_api.types.state import Covariance6x6, StateVector
+from node_api.types.time import Epoch, TimeScale
 
 
 def _parse_utc(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(UTC)
 
 
+def get_operator_reference() -> dict[str, Any]:
+    """Static + DB ids so the model does not hallucinate constellation or preset namespaces."""
+    db = SessionLocal()
+    try:
+        catalog_ids = list(
+            db.scalars(select(SpacecraftRow.sat_id).order_by(SpacecraftRow.sat_id).limit(500)),
+        )
+    finally:
+        db.close()
+    return {
+        "house_rule_constellation_ids": sorted(HOUSE_RULES.keys()),
+        "space_track_ingest_preset_ids": list_preset_ids(),
+        "catalog_satellite_ids": catalog_ids,
+        "mock_satellite_registry_ids": sorted(SATELLITES.keys()),
+        "notes": [
+            "House rules (Pc threshold, max auto-dV) use house_rule_constellation_ids — in this build "
+            "that is mainly EO-CONSTELLATION for mock fuel/state.",
+            "space_track_ingest_preset_ids are lowercase keys for importing GP data (e.g. starlink); "
+            "they are not the same strings as house_rule_constellation_ids.",
+        ],
+    }
+
+
+def get_fleet_conjunctions(horizon_hours: int = 36) -> dict[str, Any]:
+    """All active events in the latest catalog-screen snapshot (any satellite)."""
+    db = SessionLocal()
+    try:
+        results = list_all_active_conjunctions(db, horizon_hours=horizon_hours)
+    finally:
+        db.close()
+    return {
+        "horizon_hours": horizon_hours,
+        "count": len(results),
+        "conjunctions": results,
+        "source_note": "Union of events from the latest POST /conjunctions/catalog-screen snapshot.",
+    }
+
+
 def get_active_conjunctions(sat_id: str, horizon_hours: int = 36) -> dict[str, Any]:
-    results = [
-        c
-        for c in CONJUNCTIONS.values()
-        if c["primary_id"] == sat_id and c["status"] in ("NEW", "ACKNOWLEDGED")
-    ]
+    db = SessionLocal()
+    try:
+        results = list_active_conjunctions_for_sat(
+            db, sat_id=sat_id, horizon_hours=horizon_hours
+        )
+    finally:
+        db.close()
     return {
         "sat_id": sat_id,
         "horizon_hours": horizon_hours,
         "count": len(results),
         "conjunctions": results,
+        "source_note": "Events from the latest POST /conjunctions/catalog-screen snapshot (SQLite).",
     }
 
 
@@ -47,22 +111,25 @@ def get_house_rules(constellation_id: str) -> dict[str, Any]:
 
 
 def compute_time_to_tca(conjunction_id: str, reference_utc: str | None = None) -> dict[str, Any]:
-    """Seconds from a reference epoch to conjunction TCA (mock ephemeris clock)."""
-    c = CONJUNCTIONS.get(conjunction_id)
-    if c is None:
-        return {"error": f"Unknown conjunction: {conjunction_id}"}
+    """Seconds from a reference epoch to persisted catalog-screen TCA."""
+    db = SessionLocal()
+    try:
+        row = get_conjunction_by_id(db, conjunction_id)
+    finally:
+        db.close()
+    if row is None:
+        return {"error": f"Unknown conjunction: {conjunction_id} (run catalog-screen first)."}
+    c = {
+        "primary_id": row.primary_id,
+        "tca_utc": row.tca_utc.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    }
     tca = _parse_utc(c["tca_utc"])
     if reference_utc:
         t0 = _parse_utc(reference_utc)
         ref_label = reference_utc
     else:
-        sat = SATELLITES.get(c["primary_id"])
-        if sat is None:
-            t0 = datetime(2026, 5, 2, 14, 20, 0, tzinfo=UTC)
-            ref_label = "2026-05-02T14:20:00Z (default ops clock)"
-        else:
-            ref_label = sat["last_updated_utc"]
-            t0 = _parse_utc(ref_label)
+        t0 = datetime.now(UTC)
+        ref_label = t0.isoformat().replace("+00:00", "Z") + " (server UTC now)"
     dt_s = max(0.0, (tca - t0).total_seconds())
     return {
         "conjunction_id": conjunction_id,
@@ -74,18 +141,14 @@ def compute_time_to_tca(conjunction_id: str, reference_utc: str | None = None) -
 
 
 def compute_required_delta_v(conjunction_id: str) -> dict[str, Any]:
-    """RIC Δv vector and magnitude for the stored mitigation template (numeric audit step)."""
-    plan = PLANS.get(conjunction_id)
-    if plan is None:
-        return {"error": f"No maneuver template for conjunction: {conjunction_id}"}
-    dv = plan["maneuvers"][0]["delta_v_mps"]
-    x, y, z = float(dv["x"]), float(dv["y"]), float(dv["z"])
-    mag = math.sqrt(x * x + y * y + z * z)
+    """RIC Δv for a stored mitigation template (not generated for catalog-screen events yet)."""
+    _ = conjunction_id
     return {
-        "conjunction_id": conjunction_id,
-        "total_delta_v_mps": float(plan["total_delta_v_mps"]),
-        "delta_v_ric_mps": {"x": x, "y": y, "z": z},
-        "delta_v_magnitude_mps": mag,
+        "error": (
+            "No maneuver template is stored for catalog-screen conjunctions. "
+            "Size burns with your operational CA workflow or external solver; "
+            "this tool will attach once mitigation plans are persisted."
+        ),
     }
 
 
@@ -95,14 +158,14 @@ def compute_fuel_from_tsiolkovsky(
     specific_impulse_s: float = 220.0,
     g0_mps2: float = 9.80665,
 ) -> dict[str, Any]:
-    """Propellant mass via Tsiolkovsky (ideal rocket); effective wet mass calibrated to mock plan."""
+    """Propellant mass via Tsiolkovsky (ideal rocket); toy wet mass for order-of-magnitude demos."""
     sat = SATELLITES.get(sat_id)
     if sat is None:
         return {"error": f"Unknown satellite: {sat_id}"}
     ve = specific_impulse_s * g0_mps2
     if ve <= 0:
         return {"error": "Invalid exhaust velocity (Isp × g0)."}
-    # Toy wet mass so Δv ≈ 0.054 m/s ⇒ ≈ 0.002 kg consumed (matches validation copy in PLANS).
+    # Toy wet mass for demo-scale propellant estimates.
     m0_effective_kg = 80.0
     fraction = 1.0 - math.exp(-delta_v_mps / ve)
     propellant_kg = m0_effective_kg * fraction
@@ -119,52 +182,230 @@ def compute_fuel_from_tsiolkovsky(
 
 
 def estimate_post_maneuver_pc(conjunction_id: str) -> dict[str, Any]:
-    """Mock post-burn Pc after executing the template maneuver (for threshold audit)."""
-    c = CONJUNCTIONS.get(conjunction_id)
-    if c is None:
-        return {"error": f"Unknown conjunction: {conjunction_id}"}
-    primary = c["primary_id"]
-    sat = SATELLITES.get(primary)
+    """Screening Pc vs house rules; post-burn Pc needs a propagated maneuver (not stored here)."""
+    db = SessionLocal()
+    try:
+        row = get_conjunction_by_id(db, conjunction_id)
+    finally:
+        db.close()
+    if row is None:
+        return {"error": f"Unknown conjunction: {conjunction_id} (run catalog-screen first)."}
+    sat = SATELLITES.get(row.primary_id)
+    default_thr = 1e-4
     if sat is None:
-        return {"error": f"Unknown primary satellite: {primary}"}
-    const_id = sat["constellation_id"]
-    rules = HOUSE_RULES.get(const_id)
-    if rules is None:
-        return {"error": f"Unknown constellation: {const_id}"}
-    pc_prior = float(c["pc"])
-    pc_post = 4.1e-5
-    thr = float(rules["pc_mitigation_threshold"])
+        thr = default_thr
+        thr_note = (
+            f"No mock satellite registry entry for primary `{row.primary_id}`; "
+            f"using default mitigation Pc threshold {thr:g}."
+        )
+    else:
+        const_id = sat["constellation_id"]
+        rules = HOUSE_RULES.get(const_id)
+        if rules is None:
+            thr = default_thr
+            thr_note = f"Unknown constellation `{const_id}`; using default threshold {thr:g}."
+        else:
+            thr = float(rules["pc_mitigation_threshold"])
+            thr_note = f"Threshold from house rules for `{const_id}`."
+    pc_prior = float(row.pc)
     return {
         "conjunction_id": conjunction_id,
         "pc_prior": pc_prior,
-        "pc_post_estimate": pc_post,
+        "pc_method": row.pc_method,
+        "data_source": row.source,
         "mitigation_pc_threshold": thr,
-        "below_mitigation_threshold": pc_post < thr,
+        "threshold_note": thr_note,
+        "note": (
+            "Post-maneuver Pc is not computed for catalog-screen events without a maneuver template. "
+            "Compare screening Pc to threshold; use UI-provided TCA when present."
+        ),
+        "below_mitigation_threshold": pc_prior < thr,
+    }
+
+
+def _pc_method_from_db(s: str) -> PcMethod:
+    try:
+        return PcMethod(s)
+    except ValueError:
+        return PcMethod.SCREEN_HEURISTIC
+
+
+def _conjunction_source_from_db(s: str) -> ConjunctionSource:
+    try:
+        return ConjunctionSource(s)
+    except ValueError:
+        return ConjunctionSource.INTERNAL_SCREENING
+
+
+def _conjunction_status_from_db(s: str) -> ConjunctionStatus:
+    try:
+        return ConjunctionStatus(s)
+    except ValueError:
+        return ConjunctionStatus.NEW
+
+
+def _conjunction_from_row(row: ConjunctionEventRow) -> Conjunction:
+    tca = Epoch(instant=row.tca_utc.astimezone(UTC), scale=TimeScale.UTC)
+    created = Epoch(instant=row.created_at.astimezone(UTC), scale=TimeScale.UTC)
+    return Conjunction(
+        id=row.id,
+        primary_id=row.primary_id,
+        secondary_id=row.secondary_id,
+        tca=tca,
+        miss_distance_km=float(row.miss_distance_km),
+        relative_velocity_km_s=max(1e-6, float(row.relative_velocity_km_s or 0.0)),
+        pc=float(row.pc),
+        pc_method=_pc_method_from_db(row.pc_method),
+        source=_conjunction_source_from_db(row.source),
+        created_at=created,
+        status=_conjunction_status_from_db(row.status),
+    )
+
+
+def _house_rules_for_sat(sat_id: str) -> HouseRules:
+    meta = SATELLITES.get(sat_id)
+    if meta:
+        cid = str(meta["constellation_id"])
+        d = HOUSE_RULES.get(cid)
+        if d is not None:
+            return HouseRules(**d)
+    return HouseRules(**HOUSE_RULES["CATALOG-DEFAULT"])
+
+
+def _satellite_state_from_row(srow: SpacecraftRow, when: datetime) -> SatelliteState:
+    when_utc = when.astimezone(UTC)
+    _, r_km, v_km_s = trajectory_states_sgp4(srow.tle_line1, srow.tle_line2, [when_utc])[0]
+    epoch = Epoch(instant=when_utc, scale=TimeScale.UTC)
+    st = StateVector(
+        position_km=Vector3(data=np.asarray(r_km, dtype=np.float64)),
+        velocity_km_s=Vector3(data=np.asarray(v_km_s, dtype=np.float64)),
+        epoch=epoch,
+        frame=Frame.ECI_J2000,
+    )
+    diag = np.diag([1.0, 1.0, 1.0, 1e-6, 1e-6, 1e-6]).astype(np.float64)
+    cov = Covariance6x6(matrix=Matrix6x6(data=diag), epoch=epoch, frame=Frame.ECI_J2000)
+    meta = SATELLITES.get(srow.sat_id)
+    fuel = float(meta["fuel_kg"]) if meta else 100.0
+    return SatelliteState(
+        sat_id=srow.sat_id,
+        state_vector=st,
+        covariance=cov,
+        fuel_kg=fuel,
+        last_updated=epoch,
+        data_quality=DataQuality.NOMINAL,
+    )
+
+
+def _maneuver_plan_to_tool_dict(plan: ManeuverPlan) -> dict[str, Any]:
+    maneuvers: list[dict[str, Any]] = []
+    for m in plan.maneuvers:
+        dv = np.asarray(m.delta_v.data, dtype=np.float64).reshape(3)
+        maneuvers.append(
+            {
+                "epoch_utc": m.epoch.as_utc_datetime()
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "delta_v_mps": {"x": float(dv[0]), "y": float(dv[1]), "z": float(dv[2])},
+                "frame": m.frame.value,
+                "duration_s": m.duration_s,
+            },
+        )
+    return {
+        "plan_id": str(uuid.uuid4()),
+        "sat_id": plan.sat_id,
+        "maneuvers": maneuvers,
+        "total_delta_v_mps": plan.total_delta_v_mps,
+        "objective": plan.objective,
+        "generated_by": plan.generated_by.value,
+        "validation": [
+            {"passed": v.passed, "check_id": v.check_id, "message": v.message}
+            for v in plan.validation_results
+        ],
     }
 
 
 def plan_collision_avoidance(conjunction_id: str, sat_id: str) -> dict[str, Any]:
-    plan = PLANS.get(conjunction_id)
-    if plan is None:
-        return {"error": f"No pre-computed plan for conjunction: {conjunction_id}"}
-    if plan["sat_id"] != sat_id:
-        return {"error": f"Plan for {conjunction_id} is for {plan['sat_id']}, not {sat_id}"}
-    return {"status": "plan_generated", "plan": plan}
+    """Lambert-backed avoidance from catalog TLE + SQLite conjunction row (primary must match sat_id)."""
+    db = SessionLocal()
+    try:
+        row = get_conjunction_by_id(db, conjunction_id)
+        if row is None:
+            return {"error": "Unknown conjunction_id; run catalog-screen first."}
+        if row.primary_id != sat_id:
+            return {
+                "error": (
+                    f"sat_id must be the conjunction primary {row.primary_id!r}; "
+                    f"got {sat_id!r}."
+                ),
+            }
+        srow = db.get(SpacecraftRow, sat_id)
+        if srow is None:
+            return {"error": f"No catalog spacecraft row for {sat_id!r}."}
+        when = datetime.now(UTC)
+        ego = _satellite_state_from_row(srow, when)
+        cj = _conjunction_from_row(row)
+        rules = _house_rules_for_sat(sat_id)
+        try:
+            plan = run_lambert_plan(ego, cj, rules)
+        except InfeasibleProblemError as exc:
+            return {
+                "error": str(exc),
+                "hint": (
+                    "TCA may be too soon for a pre-TCA Lambert leg, or max_auto_delta_v_mps may be too low "
+                    "for the required separation."
+                ),
+            }
+        return {
+            "plan": _maneuver_plan_to_tool_dict(plan),
+            "note": (
+                "Lambert single-impulse avoidance (multi-lead timing search) from SGP4 state at server UTC now."
+            ),
+        }
+    finally:
+        db.close()
 
 
 def check_maneuver_feasibility(conjunction_id: str) -> dict[str, Any]:
-    plan = PLANS.get(conjunction_id)
-    if plan is None:
-        return {"error": f"No plan found for conjunction: {conjunction_id}"}
-    all_passed = all(v["passed"] for v in plan["validation"])
-    return {
-        "conjunction_id": conjunction_id,
-        "validation": plan["validation"],
-        "all_passed": all_passed,
-    }
+    """Re-run Lambert planner for the conjunction primary vs house rules (no separate stored plan)."""
+    db = SessionLocal()
+    try:
+        row = get_conjunction_by_id(db, conjunction_id)
+        if row is None:
+            return {"error": "Unknown conjunction_id; run catalog-screen first."}
+        sat_id = row.primary_id
+        srow = db.get(SpacecraftRow, sat_id)
+        if srow is None:
+            return {"error": f"No catalog spacecraft row for primary {sat_id!r}."}
+        when = datetime.now(UTC)
+        ego = _satellite_state_from_row(srow, when)
+        cj = _conjunction_from_row(row)
+        rules = _house_rules_for_sat(sat_id)
+        try:
+            plan = run_lambert_plan(ego, cj, rules)
+        except InfeasibleProblemError as exc:
+            return {
+                "feasible": False,
+                "conjunction_id": conjunction_id,
+                "primary_id": sat_id,
+                "reason": str(exc),
+            }
+        feasible = plan.total_delta_v_mps <= rules.max_auto_delta_v_mps + 1e-9
+        return {
+            "feasible": feasible,
+            "conjunction_id": conjunction_id,
+            "primary_id": sat_id,
+            "total_delta_v_mps": plan.total_delta_v_mps,
+            "max_auto_delta_v_mps": rules.max_auto_delta_v_mps,
+            "maneuver_count": len(plan.maneuvers),
+            "validation_all_passed": all(v.passed for v in plan.validation_results),
+        }
+    finally:
+        db.close()
 
 
 TOOL_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
+    "get_operator_reference": get_operator_reference,
+    "get_fleet_conjunctions": get_fleet_conjunctions,
     "get_active_conjunctions": get_active_conjunctions,
     "get_satellite_state": get_satellite_state,
     "get_house_rules": get_house_rules,
