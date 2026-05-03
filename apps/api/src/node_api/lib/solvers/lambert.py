@@ -254,11 +254,13 @@ def delta_v_between_keplerian_orbits(
             epoch=departure_epoch,
             delta_v=Vector3(data=dv1_mps),
             frame=BurnFrame.ECI,
+            duration_s=0.0,
         ),
         Maneuver(
             epoch=arrival_epoch,
             delta_v=Vector3(data=dv2_mps),
             frame=BurnFrame.ECI,
+            duration_s=0.0,
         ),
     ]
 
@@ -325,6 +327,7 @@ def solve_lambert_problem(
             epoch=departure.epoch,
             delta_v=Vector3(data=dv1_mps),
             frame=BurnFrame.ECI,
+            duration_s=0.0,
         ),
     ]
 

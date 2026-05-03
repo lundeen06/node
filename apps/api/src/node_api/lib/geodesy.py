@@ -53,3 +53,21 @@ def eci_m_to_lon_lat_deg(r_eci_m: NDArray[np.float64], dt_utc: datetime) -> tupl
     lon_rad = math.atan2(y, x)
     lat_rad = math.atan2(z, math.hypot(x, y))
     return math.degrees(lon_rad), math.degrees(lat_rad)
+
+
+def great_circle_distance_km(
+    lon1_deg: float,
+    lat1_deg: float,
+    lon2_deg: float,
+    lat2_deg: float,
+    *,
+    earth_radius_km: float = 6371.0088,
+) -> float:
+    """Haversine arc length on a sphere (subsatellite points), degrees in, kilometers out."""
+    φ1 = math.radians(lat1_deg)
+    φ2 = math.radians(lat2_deg)
+    Δφ = math.radians(lat2_deg - lat1_deg)
+    Δλ = math.radians(lon2_deg - lon1_deg)
+    a = math.sin(Δφ / 2) ** 2 + math.cos(φ1) * math.cos(φ2) * math.sin(Δλ / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+    return float(earth_radius_km * c)

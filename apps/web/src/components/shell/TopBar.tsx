@@ -64,6 +64,7 @@ export function TopBar() {
             className="h-12 w-12 object-contain drop-shadow-sm transition-transform group-hover:scale-[1.03]"
             priority
           />
+          <div className="text-2xl font-semibold tracking-tight italic">node.</div>
         </Link>
       </div>
 

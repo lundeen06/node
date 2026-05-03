@@ -26,12 +26,24 @@ def plan_collision_avoidance(
     ego: SatelliteState,
     event: Conjunction,
     house_rules: HouseRules,
+    *,
+    tle_line1: str | None = None,
+    tle_line2: str | None = None,
 ) -> ManeuverPlan:
     """Build a Lambert single-impulse avoidance plan bounded by ``HouseRules.max_auto_delta_v_mps``.
 
     Maps ``event`` to a :class:`CloseApproach` for :func:`solve_optimal_avoidance_timing` (several
     pre-TCA burn leads, minimum total Δv) and uses ``house_rules.pc_mitigation_threshold`` as the Pc
     policy gate in metadata (post-maneuver Pc is not recomputed in this version).
+
+    When ``tle_line1`` / ``tle_line2`` are set, the Lambert departure state is **SGP4 at the burn epoch**
+    (otherwise the caller's ``ego`` PV is reused with only the epoch shifted — legacy behavior).
     """
     threat = _close_approach_from_conjunction(event)
-    return solve_optimal_avoidance_timing(ego, threat, house_rules)
+    return solve_optimal_avoidance_timing(
+        ego,
+        threat,
+        house_rules,
+        tle_line1=tle_line1,
+        tle_line2=tle_line2,
+    )

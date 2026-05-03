@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -25,6 +25,8 @@ from node_api.lib.mission.circular_altitude_transfer import (
     plan_lambert_two_burn_circular_altitude_change,
 )
 from node_api.lib.mission.collision_avoidance import plan_collision_avoidance as run_lambert_plan
+from node_api.lib.mission.burn_utility_preview import preview_plan_utility_vs_catalog_tle
+from node_api.lib.mission.ground_track_utility import orbit_dual_deviation_report, orbit_utility_breakdown
 from node_api.lib.tle_physics import trajectory_states_sgp4
 from node_api.services.spacecraft_catalog import resolve_spacecraft_row
 from node_api.services.conjunction_store import (
@@ -40,6 +42,96 @@ from node_api.types.maneuver import ManeuverPlan
 from node_api.types.satellite import DataQuality, SatelliteState
 from node_api.types.state import Covariance6x6, StateVector
 from node_api.types.time import Epoch, TimeScale
+
+
+def evaluate_orbit_mission_value(
+    sat_id: str,
+    baseline_tle_line1: str | None = None,
+    baseline_tle_line2: str | None = None,
+    candidate_tle_line1: str | None = None,
+    candidate_tle_line2: str | None = None,
+    t0_utc: str | None = None,
+    t1_utc: str | None = None,
+    n_samples: int = 48,
+    delta_v_used_mps: float | None = None,
+    delta_v_budget_mps: float | None = None,
+    length_scale_track_km: float = 25.0,
+    length_scale_eci_km: float = 5.0,
+    w_track: float = 1.0,
+    w_eci: float = 1.0,
+    w_fuel: float = 1.0,
+) -> dict[str, Any]:
+    """Parallel ground-track + ECI RMSE vs nominal TLE, utilities, and Δv-budget loss (catalog defaults)."""
+    db = SessionLocal()
+    try:
+        srow = resolve_spacecraft_row(db, sat_id)
+        if srow is None:
+            return {
+                "error": f"No catalog spacecraft matches {sat_id!r}.",
+                "hint": "Call get_operator_reference for catalog_entries / sat_id list.",
+            }
+        if bool(baseline_tle_line1) ^ bool(baseline_tle_line2):
+            return {"error": "Provide both baseline_tle_line1 and baseline_tle_line2, or neither."}
+        if bool(candidate_tle_line1) ^ bool(candidate_tle_line2):
+            return {"error": "Provide both candidate_tle_line1 and candidate_tle_line2, or neither."}
+        b1 = baseline_tle_line1 or srow.tle_line1
+        b2 = baseline_tle_line2 or srow.tle_line2
+        c1 = candidate_tle_line1 or srow.tle_line1
+        c2 = candidate_tle_line2 or srow.tle_line2
+        now = datetime.now(UTC)
+        t0 = _parse_utc(t0_utc) if t0_utc else now
+        t1 = _parse_utc(t1_utc) if t1_utc else now + timedelta(hours=12)
+        ns = max(2, min(int(n_samples), 200))
+        rules = _house_rules_for_sat(srow.sat_id)
+        dv_used = 0.0 if delta_v_used_mps is None else float(delta_v_used_mps)
+        dv_budget = float(rules.max_auto_delta_v_mps) if delta_v_budget_mps is None else float(delta_v_budget_mps)
+        dv_budget = max(dv_budget, 1e-6)
+        same_tle = b1.strip() == c1.strip() and b2.strip() == c2.strip()
+        dual = orbit_dual_deviation_report(b1, b2, c1, c2, t0, t1, n_samples=ns)
+        util = orbit_utility_breakdown(
+            b1,
+            b2,
+            c1,
+            c2,
+            t0,
+            t1,
+            delta_v_used_mps=dv_used,
+            delta_v_budget_mps=dv_budget,
+            n_samples=ns,
+            length_scale_track_km=float(length_scale_track_km),
+            length_scale_eci_km=float(length_scale_eci_km),
+            w_track=float(w_track),
+            w_eci=float(w_eci),
+            w_fuel=float(w_fuel),
+        )
+        out: dict[str, Any] = {
+            "sat_id": srow.sat_id,
+            "norad_catalog_id": srow.norad_catalog_id,
+            "t0_utc": t0.isoformat().replace("+00:00", "Z"),
+            "t1_utc": t1.isoformat().replace("+00:00", "Z"),
+            "n_samples": ns,
+            "baseline_source": "argument" if (baseline_tle_line1 and baseline_tle_line2) else "catalog",
+            "candidate_source": "argument" if (candidate_tle_line1 and candidate_tle_line2) else "catalog",
+            "measures_two_tle_ephemeris_difference": not same_tle,
+            "parallel_deviation": dual.model_dump(),
+            "utility_and_loss": util.model_dump(),
+            "note": (
+                "parallel_deviation compares two TLEs propagated with SGP4 (same UTC lattice). "
+                "Pass baseline_tle_line* for a frozen mission reference and candidate_tle_line* for a "
+                "different mean element set (e.g. post-fit TLE)."
+            ),
+        }
+        if same_tle:
+            out["warning"] = (
+                "Baseline and candidate are the same catalog TLE lines: RMSE and utility here are a sanity "
+                "check (~0) and do **not** measure maneuver impact or post-burn vs ideal orbit. For Δv plan "
+                "tradeoffs vs no-burn catalog, use **utility_preview** from plan_collision_avoidance or "
+                "plan_orbit_altitude_change (already returned with the plan). For strict TLE-vs-TLE after a "
+                "new element set exists, call this tool again with distinct candidate_tle_line*."
+            )
+        return out
+    finally:
+        db.close()
 
 
 def plan_orbit_altitude_change(
@@ -82,12 +174,15 @@ def plan_orbit_altitude_change(
                     "reference_utc."
                 ),
             }
+        rules = _house_rules_for_sat(srow.sat_id)
         return {
             "plan": _maneuver_plan_to_tool_dict(plan, not_before=plan_not_before),
+            "utility_preview": _utility_preview_for_catalog_plan(srow, plan, rules),
             "note": (
                 "Two ECI burns: Lambert arc to the antipodal point on the target circular orbit, then "
                 "circularization. Coplanar with the current osculating plane from SGP4 at reference_utc "
-                "(server UTC if omitted)."
+                "(server UTC if omitted). utility_preview scores orbit / ground-track departure from the "
+                "catalog SGP4 if you never burn vs post-maneuver two-body coast over one Kozai period."
             ),
         }
     finally:
@@ -96,6 +191,18 @@ def plan_orbit_altitude_change(
 
 def _parse_utc(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _utility_preview_for_catalog_plan(srow: SpacecraftRow, plan: ManeuverPlan, rules: HouseRules) -> dict[str, Any]:
+    """Post-burn path vs catalog SGP4 if you never burn, over one Kozai period; Δv vs house-rules budget."""
+    return preview_plan_utility_vs_catalog_tle(
+        srow.tle_line1,
+        srow.tle_line2,
+        list(plan.maneuvers),
+        n_samples=48,
+        delta_v_budget_mps=float(rules.max_auto_delta_v_mps),
+        delta_v_used_mps=float(plan.total_delta_v_mps),
+    )
 
 
 def get_operator_reference() -> dict[str, Any]:
@@ -363,6 +470,17 @@ def _satellite_state_from_row(srow: SpacecraftRow, when: datetime) -> SatelliteS
     )
 
 
+def _state_vector_to_tool_dict(st: StateVector) -> dict[str, Any]:
+    p = np.asarray(st.position_km.data, dtype=np.float64).reshape(3)
+    v = np.asarray(st.velocity_km_s.data, dtype=np.float64).reshape(3)
+    return {
+        "epoch_utc": st.epoch.as_utc_datetime().isoformat().replace("+00:00", "Z"),
+        "frame": st.frame.value,
+        "position_km": {"x": float(p[0]), "y": float(p[1]), "z": float(p[2])},
+        "velocity_km_s": {"x": float(v[0]), "y": float(v[1]), "z": float(v[2])},
+    }
+
+
 def _maneuver_plan_to_tool_dict(plan: ManeuverPlan, *, not_before: datetime | None = None) -> dict[str, Any]:
     ref = (not_before or datetime.now(UTC)).astimezone(UTC)
     maneuvers: list[dict[str, Any]] = []
@@ -391,6 +509,8 @@ def _maneuver_plan_to_tool_dict(plan: ManeuverPlan, *, not_before: datetime | No
         "objective": plan.objective,
         "generated_by": plan.generated_by.value,
         "validation": validation,
+        "predicted_post_state": _state_vector_to_tool_dict(plan.predicted_post_state),
+        "time_of_flight_s": plan.time_of_flight_s,
     }
 
 
@@ -424,7 +544,7 @@ def plan_collision_avoidance(conjunction_id: str, sat_id: str) -> dict[str, Any]
         cj = _conjunction_from_row(row)
         rules = _house_rules_for_sat(srow.sat_id)
         try:
-            plan = run_lambert_plan(ego, cj, rules)
+            plan = run_lambert_plan(ego, cj, rules, tle_line1=srow.tle_line1, tle_line2=srow.tle_line2)
         except InfeasibleProblemError as exc:
             return {
                 "error": str(exc),
@@ -435,8 +555,13 @@ def plan_collision_avoidance(conjunction_id: str, sat_id: str) -> dict[str, Any]
             }
         return {
             "plan": _maneuver_plan_to_tool_dict(plan, not_before=plan_not_before),
+            "utility_preview": _utility_preview_for_catalog_plan(srow, plan, rules),
             "note": (
-                "Lambert single-impulse avoidance (multi-lead timing search) from SGP4 state at server UTC now."
+                "Lambert single-impulse avoidance (multi-lead timing search): departure state is SGP4 at the "
+                "burn epoch from the catalog TLE (not stale PV with only the epoch changed). "
+                "utility_preview: post-maneuver path vs ideal no-burn SGP4 (catalog TLE until a mission baseline "
+                "exists), samples from first_burn+1s over one Kozai period; summed squared losses, calibration, "
+                "utility vs max_auto_delta_v_mps."
             ),
         }
     finally:
@@ -459,7 +584,7 @@ def check_maneuver_feasibility(conjunction_id: str) -> dict[str, Any]:
         cj = _conjunction_from_row(row)
         rules = _house_rules_for_sat(sat_id)
         try:
-            plan = run_lambert_plan(ego, cj, rules)
+            plan = run_lambert_plan(ego, cj, rules, tle_line1=srow.tle_line1, tle_line2=srow.tle_line2)
         except InfeasibleProblemError as exc:
             return {
                 "feasible": False,
@@ -483,6 +608,7 @@ def check_maneuver_feasibility(conjunction_id: str) -> dict[str, Any]:
 
 TOOL_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "get_operator_reference": get_operator_reference,
+    "evaluate_orbit_mission_value": evaluate_orbit_mission_value,
     "get_fleet_conjunctions": get_fleet_conjunctions,
     "get_active_conjunctions": get_active_conjunctions,
     "get_satellite_state": get_satellite_state,

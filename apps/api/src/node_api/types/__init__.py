@@ -44,6 +44,13 @@ from node_api.types.maneuver import (
     ThrustProfileStub,
     ValidationOutcome,
 )
+from node_api.types.mission_economics import (
+    EciPositionDeviationReport,
+    GroundTrackDeviationReport,
+    OrbitDeviationPairReport,
+    OrbitUtilityBreakdown,
+    SatelliteDeltaVBudget,
+)
 from node_api.types.satellite import (
     DataQuality,
     GeometricScreenResult,
@@ -110,6 +117,7 @@ __all__ = [
     "Covariance6x6",
     "DataQuality",
     "EOPParams",
+    "EciPositionDeviationReport",
     "EclipseInterval",
     "Epoch",
     "EquinoctialElements",
@@ -118,6 +126,7 @@ __all__ = [
     "Frame",
     "GeometricScreenResult",
     "GeodeticPosition",
+    "GroundTrackDeviationReport",
     "GroundContact",
     "GroundPass",
     "GroundStation",
@@ -140,6 +149,8 @@ __all__ = [
     "OEMHeader",
     "OEMStateSample",
     "ObjectType",
+    "OrbitDeviationPairReport",
+    "OrbitUtilityBreakdown",
     "OperationalBox",
     "OperationalElementTolerances",
     "OperatorDecision",
@@ -148,6 +159,7 @@ __all__ = [
     "PlanOrigin",
     "RadiationDoseSample",
     "RcsSize",
+    "SatelliteDeltaVBudget",
     "Satellite",
     "SatelliteState",
     "SpaceWeatherState",
