@@ -19,6 +19,10 @@ class Settings(BaseSettings):
         default="http://localhost:3000",
         description="Comma-separated list of allowed CORS origins.",
     )
+    openai_api_key: str = Field(
+        default="",
+        description="OpenAI API key (NODE_OPENAI_API_KEY).",
+    )
 
 
 # Canonical Earth gravitational parameter for two-body scaffolding (km^3/s^2).

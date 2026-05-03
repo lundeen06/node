@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2.5",
     "pydantic-settings>=2.2",
     "numpy>=1.26",
+    "openai>=1.30",
 ]
 
 [project.optional-dependencies]
@@ -46,4 +47,8 @@ no_implicit_optional = true
 
 [[tool.mypy.overrides]]
 module = "numpy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "openai.*"
 ignore_missing_imports = true

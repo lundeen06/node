@@ -38,6 +38,15 @@ const config: Config = {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      keyframes: {
+        "agent-shimmer": {
+          "0%": { transform: "translateX(-100%)" },
+          "100%": { transform: "translateX(350%)" },
+        },
+      },
+      animation: {
+        "agent-shimmer": "agent-shimmer 1.75s ease-in-out infinite",
+      },
     },
   },
   plugins: [animate],

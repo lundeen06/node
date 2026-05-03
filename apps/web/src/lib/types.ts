@@ -61,3 +61,46 @@ export interface ManeuverPlan {
   objective: string;
   generatedBy: "AGENT" | "SOLVER" | "OPERATOR";
 }
+
+// Agent conversation types
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export interface AgentTurnRequest {
+  session_id: string;
+  operator_id: string;
+  messages: ChatMessage[];
+  focus_sat_id?: string;
+}
+
+export interface DeltaVMps {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface ManeuverResponse {
+  epoch_utc: string;
+  delta_v_mps: DeltaVMps;
+  frame: string;
+  duration_s?: number;
+}
+
+export interface PlanResponse {
+  plan_id: string;
+  sat_id: string;
+  maneuvers: ManeuverResponse[];
+  total_delta_v_mps: number;
+  objective: string;
+  generated_by: string;
+  validation_passed: boolean;
+}
+
+export interface AgentTurnResponse {
+  assistant_message: string;
+  proposed_plans: PlanResponse[];
+  citations: string[];
+}
