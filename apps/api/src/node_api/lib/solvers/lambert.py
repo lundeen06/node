@@ -64,6 +64,25 @@ def _lambert_vallado(
         msg = "Gravitational parameter must be positive."
         raise InfeasibleProblemError(msg)
 
+    try:
+        return _lambert_vallado_core(r0_m, r_m, tof_s, mu_m3_s2, prograde=prograde, numiter=numiter, rtol=rtol)
+    except (ValueError, OverflowError) as exc:
+        # sqrt domain on bad y/c2, or Stumpff overflows (|cosh/sinh(sqrt(|psi|))|) during extreme ψ iterates.
+        raise InfeasibleProblemError(
+            "Lambert universal-variable step failed (numerical domain overflow or sqrt domain issue).",
+        ) from exc
+
+
+def _lambert_vallado_core(
+    r0_m: NDArray[np.float64],
+    r_m: NDArray[np.float64],
+    tof_s: float,
+    mu_m3_s2: float,
+    *,
+    prograde: bool,
+    numiter: int = 60,
+    rtol: float = 1e-8,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     r0 = np.asarray(r0_m, dtype=np.float64).reshape(3)
     r = np.asarray(r_m, dtype=np.float64).reshape(3)
 
@@ -107,24 +126,41 @@ def _lambert_vallado(
     psi_up = 4.0 * math.pi**2
 
     y = 0.0
+    sqrt_mu = math.sqrt(mu_m3_s2)
+    inner_y_cap = 120
     count = 0
     while count < numiter:
         c2 = _stumpff_c2(psi)
         c3 = _stumpff_c3(psi)
+        if c2 <= 0.0:
+            msg = "Lambert Stumpff c2 became non-positive; geometry/TOF may be infeasible for this branch."
+            raise InfeasibleProblemError(msg)
         sqrt_c2 = math.sqrt(c2)
         y = norm_r0_plus_norm_r + a_lane * (psi * c3 - 1.0) / sqrt_c2
 
         if a_lane > 0.0:
-            while y < 0.0:
+            inner_y = 0
+            while y < 0.0 and inner_y < inner_y_cap:
+                inner_y += 1
                 psi_low = psi
                 psi = 0.8 * (1.0 / c3) * (1.0 - norm_r0_times_norm_r * sqrt_c2 / a_lane)
                 c2 = _stumpff_c2(psi)
                 c3 = _stumpff_c3(psi)
+                if c2 <= 0.0:
+                    raise InfeasibleProblemError("Lambert inner iteration: c2 became non-positive.")
                 sqrt_c2 = math.sqrt(c2)
                 y = norm_r0_plus_norm_r + a_lane * (psi * c3 - 1.0) / sqrt_c2
+            if y <= 0.0:
+                raise InfeasibleProblemError("Lambert could not enforce a positive chord parameter y (short-way branch).")
 
-        xi = math.sqrt(y / c2)
-        tof_new = (xi**3 * c3 + a_lane * math.sqrt(y)) / math.sqrt(mu_m3_s2)
+        if y <= 0.0 or c2 <= 0.0:
+            raise InfeasibleProblemError("Lambert geometry produced non-positive y or c2 before time-of-flight solve.")
+
+        xy_ratio = y / c2
+        if xy_ratio <= 0.0:
+            raise InfeasibleProblemError("Lambert chord ratio y/c2 is non-positive for this geometry.")
+        xi = math.sqrt(xy_ratio)
+        tof_new = (xi**3 * c3 + a_lane * math.sqrt(y)) / sqrt_mu
 
         if abs((tof_new - tof_s) / tof_s) < rtol:
             break
@@ -139,12 +175,20 @@ def _lambert_vallado(
         msg = "Lambert solver did not converge for the given geometry and time of flight."
         raise InfeasibleProblemError(msg)
 
+    if y <= 0.0:
+        raise InfeasibleProblemError("Lambert terminal y is non-positive.")
     f = 1.0 - y / norm_r0
+    if y / mu_m3_s2 <= 0.0:
+        raise InfeasibleProblemError("Lambert terminal y/μ is non-positive.")
     g = a_lane * math.sqrt(y / mu_m3_s2)
     gdot = 1.0 - y / norm_r
+    if abs(g) < 1e-30:
+        raise InfeasibleProblemError("Lambert g parameter degenerate (near-zero); transfer is singular.")
 
     v0 = (r - f * r0) / g
     v = (gdot * r - r0) / g
+    if not (np.all(np.isfinite(v0)) and np.all(np.isfinite(v))):
+        raise InfeasibleProblemError("Lambert produced non-finite terminal velocities.")
     return np.asarray(v0, dtype=np.float64), np.asarray(v, dtype=np.float64)
 
 
@@ -295,6 +339,9 @@ def solve_lambert_problem(
     maneuver). For matching a **target** osculating orbit at arrival, use
     :func:`delta_v_between_keplerian_orbits`.
 
+    Both short-way and long-way branches (``prograde`` / ``not prograde``) are attempted;
+    the returned plan uses the branch with the smaller ‖Δv‖ at departure.
+
     The returned plan has ``time_of_flight_s`` set to
     ``arrival_epoch - departure.epoch`` in seconds.
     """
@@ -309,7 +356,20 @@ def solve_lambert_problem(
     r_m = np.asarray(arrival_position_km.data, dtype=np.float64).reshape(3) * 1000.0
     v0_mps = np.asarray(departure.velocity_km_s.data, dtype=np.float64).reshape(3) * 1000.0
 
-    v1t_mps, v2t_mps = _lambert_vallado(r0_m, r_m, tof_s, mu, prograde=prograde)
+    candidates: list[tuple[float, NDArray[np.float64], NDArray[np.float64]]] = []
+    branches = (prograde, not prograde)
+    for pr in branches:
+        try:
+            v1t, v2t = _lambert_vallado(r0_m, r_m, tof_s, mu, prograde=pr)
+        except InfeasibleProblemError:
+            continue
+        dv = float(np.linalg.norm(v1t - v0_mps))
+        candidates.append((dv, v1t, v2t))
+    if not candidates:
+        msg = "Lambert has no feasible short/long-way branch for this chord and time of flight."
+        raise InfeasibleProblemError(msg)
+    candidates.sort(key=lambda c: c[0])
+    v1t_mps, v2t_mps = candidates[0][1], candidates[0][2]
 
     dv1_mps = v1t_mps - v0_mps
     total_dv_mps = float(np.linalg.norm(dv1_mps))

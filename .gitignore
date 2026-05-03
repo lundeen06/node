@@ -46,5 +46,8 @@ out/
 # Local API database
 apps/api/node.sqlite
 
+# Local API env overrides
+apps/api/sanantha.env
+
 # Ad-hoc API export dumps
 spacecraft-list.json

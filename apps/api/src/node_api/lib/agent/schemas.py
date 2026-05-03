@@ -149,13 +149,13 @@ _AGENT_TOOL_SPECS: list[dict[str, object]] = [
     {
         "name": "plan_collision_avoidance",
         "description": (
-            "Build a Lambert single-impulse avoidance plan from the catalog TLE and a persisted "
-            "catalog-screen conjunction (sat_id must be the event primary). Returns maneuvers with "
-            "epoch_utc, delta_v_mps (ECI m/s), frame, and validation entries for the UI. Always returns "
-            "utility_preview (utility_and_loss.utility_unitless < 1 means mission utility reduction vs "
-            "no-burn catalog over the preview window; cite RMSE, calibration verdicts, combined_loss in prose). "
-            "Post-maneuver vs ideal no-burn SGP4 over one Kozai period from first burn + 1 s; integrated_loss "
-            "and RMSE/L ratios quantify opportunity cost traded for separation."
+            "Build an impulsive avoidance plan from the catalog TLE and a persisted catalog-screen "
+            "conjunction (sat_id must be the event primary). Primary solver: Lambert chord to an out-of-plane "
+            "offset at TCA under house-rule ‖Δv‖; extended burn-lead search up to ~24 h pre-TCA. If Lambert fails "
+            "numerically or is Δv-bound, the server falls back to a cross-track impulse grid "
+            "(``plan.objective`` contains ``cross_track_fallback`` when that path was used). Same wire format: maneuver epochs, delta_v_mps "
+            "(ECI m/s). Always returns utility_preview (utility_unitless < 1 = mission degradation vs catalog "
+            "no-burn baseline; cite RMSE, verdicts, combined_loss)."
         ),
         "input_schema": {
             "type": "object",
@@ -172,8 +172,8 @@ _AGENT_TOOL_SPECS: list[dict[str, object]] = [
     {
         "name": "check_maneuver_feasibility",
         "description": (
-            "Re-run the Lambert avoidance planner for the conjunction primary and report whether "
-            "total Δv is within house-rules max_auto_delta_v_mps."
+            "Re-run the avoidance planner for the conjunction primary (Lambert primacy plus cross-track fallback) "
+            "and report whether total Δv respects max_auto_delta_v_mps plus validation summary hints."
         ),
         "input_schema": {
             "type": "object",

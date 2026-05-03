@@ -35,19 +35,6 @@ const STORAGE_PLAN_ANCHOR = "node-agent-plan-anchor";
 
 const MAX_SESSIONS = 40;
 
-/** Append new agent plans without dropping earlier pending proposals (dedupe by ``plan_id``). */
-function mergeProposedPlans(prev: PlanResponse[], incoming: PlanResponse[]): PlanResponse[] {
-  const seen = new Set(prev.map((p) => p.plan_id));
-  const next = [...prev];
-  for (const p of incoming) {
-    if (!seen.has(p.plan_id)) {
-      next.push(p);
-      seen.add(p.plan_id);
-    }
-  }
-  return next;
-}
-
 const BURN_VS_SIM_MARGIN_MS = 1000;
 
 /** True if any maneuver epoch is strictly before ``sim`` minus 1 s (aligned with API burn-epoch gate). */
@@ -57,6 +44,40 @@ function planHasBurnBeforeSimInstant(plan: PlanResponse, sim: Date): boolean {
     const t = Date.parse(m.epoch_utc);
     return !Number.isFinite(t) || t < simMs - BURN_VS_SIM_MARGIN_MS;
   });
+}
+
+/** Ops sim instant used for burn-timing validation (frozen at proposal receipt when possible). */
+function burnValidationInstantForPlan(plan: PlanResponse, fallback: Date): Date {
+  const iso = plan.proposal_sim_anchor_utc;
+  if (!iso) return fallback;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? new Date(ms) : fallback;
+}
+
+function ensurePlansSimProposalAnchors(plans: PlanResponse[], simUtc: Date): PlanResponse[] {
+  const iso = simUtc.toISOString();
+  return plans.map((p) => (p.proposal_sim_anchor_utc ? p : { ...p, proposal_sim_anchor_utc: iso }));
+}
+
+/** Append new agent plans without dropping earlier pending proposals (dedupe by ``plan_id``). */
+function mergeProposedPlans(
+  prev: PlanResponse[],
+  incoming: PlanResponse[],
+  proposalSimAnchorUtc: Date,
+): PlanResponse[] {
+  const seen = new Set(prev.map((p) => p.plan_id));
+  const next = [...prev];
+  const iso = proposalSimAnchorUtc.toISOString();
+  for (const p of incoming) {
+    if (!seen.has(p.plan_id)) {
+      next.push({
+        ...p,
+        proposal_sim_anchor_utc: p.proposal_sim_anchor_utc ?? iso,
+      });
+      seen.add(p.plan_id);
+    }
+  }
+  return next;
 }
 
 /** text-xs ~15px line + py-2 (8px×2) — minimum two visible lines. */
@@ -272,9 +293,10 @@ function PlanCard({
 
   if (plan.maneuvers.length === 0) return null;
 
-  const simInstant = getSimInstant();
-  const simMs = simInstant.getTime();
-  const burnBeforeSim = planHasBurnBeforeSimInstant(plan, simInstant);
+  const liveSim = getSimInstant();
+  const validationSim = burnValidationInstantForPlan(plan, liveSim);
+  const simMs = liveSim.getTime();
+  const burnBeforeSim = planHasBurnBeforeSimInstant(plan, validationSim);
   const effectiveValidationPassed = plan.validation_passed && !burnBeforeSim;
 
   return (
@@ -357,8 +379,9 @@ function PlanCard({
             </div>
             {plan.validation_passed && burnBeforeSim ? (
               <p className="text-[10px] text-amber-600">
-                One or more burns are before the ops sim clock; they cannot be treated as valid to
-                execute from this timeline.
+                One or more burns are before the ops sim timeline at proposal time; they cannot be
+                executed forward from that decision point. Sync the sim to wall clock or ask the agent
+                for a plan relative to the current epoch.
               </p>
             ) : null}
           </div>
@@ -594,7 +617,8 @@ export function AgentChat() {
         });
 
         if (plans && plans.length > 0) {
-          setProposedPlans((prev) => mergeProposedPlans(prev, plans));
+          const proposalSimUtc = getSimInstant();
+          setProposedPlans((prev) => mergeProposedPlans(prev, plans, proposalSimUtc));
           setPlanAnchorIndex(insertAt);
         }
 
@@ -608,7 +632,7 @@ export function AgentChat() {
       cancelled = true;
       window.cancelAnimationFrame(raf);
     };
-  }, [agentPhase]);
+  }, [agentPhase, getSimInstant]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -642,7 +666,7 @@ export function AgentChat() {
       if (isBusy || s.id === activeSessionId) return;
       setActiveSessionId(s.id);
       setMessages(s.messages);
-      setProposedPlans(s.proposedPlans);
+      setProposedPlans(ensurePlansSimProposalAnchors(s.proposedPlans, getSimInstant()));
       setPlanAnchorIndex(s.planAnchorIndex);
       sessionId.current = s.apiSessionId;
       setInput("");
@@ -656,7 +680,7 @@ export function AgentChat() {
         return prev;
       });
     },
-    [isBusy, activeSessionId, persistBundle],
+    [isBusy, activeSessionId, getSimInstant, persistBundle],
   );
 
   function handleInputChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
@@ -750,7 +774,7 @@ export function AgentChat() {
         delta_v_mps: { ...m.delta_v_mps },
         frame: m.frame || "ECI",
       }));
-      const anchorUtcMs = getSimInstant().getTime();
+      const anchorUtcMs = burnValidationInstantForPlan(p, getSimInstant()).getTime();
       setManeuverPreviewConfig({
         planId: p.plan_id,
         satId: p.sat_id,
@@ -781,7 +805,8 @@ export function AgentChat() {
     }
     if (suppressedAutoPreviewPlanIdsRef.current.has(p.plan_id)) return;
     if (p.maneuvers.some((m) => String(m.frame).toUpperCase() !== "ECI")) return;
-    if (!p.validation_passed || planHasBurnBeforeSimInstant(p, getSimInstant())) return;
+    if (!p.validation_passed || planHasBurnBeforeSimInstant(p, burnValidationInstantForPlan(p, getSimInstant())))
+      return;
     applyPlanPreview(p, { burnApplied: false });
   }, [
     applyPlanPreview,
@@ -792,7 +817,12 @@ export function AgentChat() {
 
   const handlePlanApprove = useCallback(
     (p: PlanResponse) => {
-      if (!p.validation_passed || planHasBurnBeforeSimInstant(p, getSimInstant())) return;
+      if (
+        !p.validation_passed ||
+        planHasBurnBeforeSimInstant(p, burnValidationInstantForPlan(p, getSimInstant()))
+      ) {
+        return;
+      }
       clearConjunctionHitsForOperator();
       setSelectedConjunctionId(null);
       const nonEci = p.maneuvers.some((m) => String(m.frame).toUpperCase() !== "ECI");
@@ -861,7 +891,12 @@ export function AgentChat() {
 
   const handleShowGlobePreviewFor = useCallback(
     (p: PlanResponse) => {
-      if (!p.validation_passed || planHasBurnBeforeSimInstant(p, getSimInstant())) return;
+      if (
+        !p.validation_passed ||
+        planHasBurnBeforeSimInstant(p, burnValidationInstantForPlan(p, getSimInstant()))
+      ) {
+        return;
+      }
       if (p.maneuvers.some((m) => String(m.frame).toUpperCase() !== "ECI")) return;
       suppressedAutoPreviewPlanIdsRef.current.delete(p.plan_id);
       applyPlanPreview(p, { burnApplied: false });

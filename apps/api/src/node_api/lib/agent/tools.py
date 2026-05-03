@@ -638,25 +638,32 @@ def plan_collision_avoidance(conjunction_id: str, sat_id: str) -> dict[str, Any]
         ego = _satellite_state_from_row(srow, when)
         cj = _conjunction_from_row(row)
         rules = _house_rules_for_sat(srow.sat_id)
+        planner_hint = (
+            "TCA may be in the past or leave too little coast time, Δv policy may exclude the Lambert chord, "
+            "or PV/TLE data may be ill-conditioned such that Lambert and the automatic cross-track fallback "
+            "both fail. Re-run catalog screening with fresh TLEs, confirm the event TCA is ahead of wall "
+            "clock, and call check_maneuver_feasibility after any catalog update."
+        )
         try:
             plan = run_lambert_plan(ego, cj, rules, tle_line1=srow.tle_line1, tle_line2=srow.tle_line2)
         except InfeasibleProblemError as exc:
+            return {"error": str(exc), "hint": planner_hint}
+        except OverflowError as exc:
             return {
-                "error": str(exc),
-                "hint": (
-                    "TCA may be too soon for a pre-TCA Lambert leg, or max_auto_delta_v_mps may be too low "
-                    "for the required separation."
+                "error": (
+                    f"Planner numeric overflow ({exc!s}); geometry or PV/TLE may be inconsistent. "
+                    "Try catalog re-screen — often resolves after fresh SGP4 state."
                 ),
+                "hint": planner_hint,
             }
         return {
             "plan": _maneuver_plan_to_tool_dict(plan, not_before=plan_not_before),
             "utility_preview": _utility_preview_for_catalog_plan(srow, plan, rules),
             "note": (
-                "Lambert single-impulse avoidance (multi-lead timing search): departure state is SGP4 at the "
-                "burn epoch from the catalog TLE (not stale PV with only the epoch changed). "
-                "utility_preview: post-maneuver path vs ideal no-burn SGP4 (catalog TLE until a mission baseline "
-                "exists), samples from first_burn+1s over one Kozai period; summed squared losses, calibration, "
-                "utility vs max_auto_delta_v_mps."
+                "Avoidance planner (Lambert to out-of-plane offset; burn-lead scan to ~24 h pre-TCA; cross-track "
+                "impulse fallback when Lambert chords fail within ‖Δv‖ policy): departure is SGP4 at burn epoch "
+                "from catalog TLE. utility_preview compares post-burn vs ideal no-burn SGP4 for one Kozai horizon "
+                "from first_burn+1s (losses vs max_auto_delta_v_mps)."
             ),
         }
     finally:
@@ -664,7 +671,7 @@ def plan_collision_avoidance(conjunction_id: str, sat_id: str) -> dict[str, Any]
 
 
 def check_maneuver_feasibility(conjunction_id: str) -> dict[str, Any]:
-    """Re-run Lambert planner for the conjunction primary vs house rules (no separate stored plan)."""
+    """Re-run collision planner (Lambert + cross-track fallback) for primary vs house rules."""
     db = SessionLocal()
     try:
         row = get_conjunction_by_id(db, conjunction_id)
@@ -687,6 +694,15 @@ def check_maneuver_feasibility(conjunction_id: str) -> dict[str, Any]:
                 "primary_id": sat_id,
                 "reason": str(exc),
             }
+        except OverflowError as exc:
+            return {
+                "feasible": False,
+                "conjunction_id": conjunction_id,
+                "primary_id": sat_id,
+                "reason": (
+                    f"Planner numeric overflow ({exc!s}); try fresh catalog-screen and ensure TCA is ahead of UTC now."
+                ),
+            }
         feasible = plan.total_delta_v_mps <= rules.max_auto_delta_v_mps + 1e-9
         return {
             "feasible": feasible,
@@ -695,6 +711,7 @@ def check_maneuver_feasibility(conjunction_id: str) -> dict[str, Any]:
             "total_delta_v_mps": plan.total_delta_v_mps,
             "max_auto_delta_v_mps": rules.max_auto_delta_v_mps,
             "maneuver_count": len(plan.maneuvers),
+            "plan_objective": plan.objective,
             "validation_all_passed": all(v.passed for v in plan.validation_results),
         }
     finally:

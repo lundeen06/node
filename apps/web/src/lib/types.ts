@@ -109,6 +109,11 @@ export interface PlanResponse {
   objective: string;
   generated_by: string;
   validation_passed: boolean;
+  /**
+   * Client-only: ops sim UTC when this proposal was first accepted into the shell.
+   * Burn “executable?” checks compare maneuver epochs against this instant (frozen), not moving sim time.
+   */
+  proposal_sim_anchor_utc?: string;
 }
 
 export interface AgentTurnResponse {

@@ -38,10 +38,14 @@ plan from the catalog TLE alone.
 threshold 1e-3, max auto Δv 800 m/s) with a ``note``. If you fall back, quote the threshold and the \
 fact that it is the catalog default rather than a constellation-specific rule. Demo synthetic sats \
 (``00-DEMO-*``) and any non-house-ruled catalog object should use CATALOG-DEFAULT.
-- **plan_collision_avoidance** and **check_maneuver_feasibility** run a Lambert single-impulse solver \
-on the catalog TLE for the conjunction **primary** (pass ``sat_id`` equal to ``primary_id``). Use them \
-after identifying the event; if the solver returns an error (e.g. TCA too soon), say so clearly. \
-**compute_required_delta_v** remains a stub for stored templates — do not require it for Lambert plans.
+- **plan_collision_avoidance** and **check_maneuver_feasibility** optimize an impulsive plan on the catalog TLE \
+for the conjunction **primary** (pass ``sat_id`` equal to ``primary_id``). The server tries Lambert-to-offset \
+timing first (extended burn-lead scan up to about a day pre-TCA) and falls back automatically to a \
+cross-track Δv grid if the Lambert chord fails (``objective`` will mention ``cross_track_fallback`` \
+when applicable). Quote tool errors verbatim if both paths fail instead of improvising remediation; actionable \
+follow-ups include **catalog-screen** refresh, verifying TCA is ahead of UTC now, calling \
+**check_maneuver_feasibility**, and inspecting **utility_preview**. **compute_required_delta_v** stays a stub \
+— do not rely on it for avoidance plans.
 - Whenever **plan_collision_avoidance** or **plan_orbit_altitude_change** returns a plan, the payload \
 includes **utility_preview**. You **must** treat this as part of the core trade, not an optional footnote: \
 in the same reply, explicitly describe **mission utility / ephemeris cost** of executing the plan. Quote \
