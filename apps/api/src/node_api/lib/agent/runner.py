@@ -6,15 +6,19 @@ Defines the HTTP-wire request/response types used by routes/agent.py.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 import openai
 from pydantic import BaseModel, ConfigDict, Field
 
 from node_api.config import settings
+from node_api.db.session import SessionLocal
+from node_api.lib.agent.plan_validation import plan_dict_validation_passed
 from node_api.lib.agent.prompts import SYSTEM_PROMPT
 from node_api.lib.agent.schemas import OPENAI_CHAT_TOOLS
 from node_api.lib.agent.tools import TOOL_REGISTRY
+from node_api.services.conjunction_store import upsert_operator_conjunction_context
 
 # ---------------------------------------------------------------------------
 # Wire types (JSON-native; no numpy)
@@ -143,7 +147,7 @@ def _plan_dict_to_response(plan: dict[str, Any]) -> PlanResponse:
         )
         for m in plan["maneuvers"]
     ]
-    all_passed = all(v["passed"] for v in plan.get("validation", []))
+    all_passed = plan_dict_validation_passed(plan, not_before=datetime.now(UTC))
     return PlanResponse(
         plan_id=plan["plan_id"],
         sat_id=plan["sat_id"],
@@ -171,6 +175,15 @@ def run_agent_turn(request: AgentTurnRequest) -> AgentTurnResponse:
             "NODE_OPENAI_API_KEY is empty. Set it in apps/api/.env and restart uvicorn.",
         )
     client = openai.OpenAI(api_key=api_key)
+
+    if request.conjunction_context is not None:
+        cc0 = request.conjunction_context
+        if cc0.conjunction_id and cc0.primary_sat_id and cc0.secondary_sat_id and cc0.tca_utc:
+            db0 = SessionLocal()
+            try:
+                upsert_operator_conjunction_context(db0, cc0.model_dump(mode="json"))
+            finally:
+                db0.close()
 
     system_content = SYSTEM_PROMPT
     if request.conjunction_context is not None:
@@ -236,12 +249,21 @@ def run_agent_turn(request: AgentTurnRequest) -> AgentTurnResponse:
                     "content": json.dumps(result),
                 },
             )
-            if tool_call.function.name == "plan_collision_avoidance" and "plan" in result:
+            if (
+                tool_call.function.name in ("plan_collision_avoidance", "plan_orbit_altitude_change")
+                and "plan" in result
+            ):
                 produced_plans.append(_plan_dict_to_response(cast(dict[str, Any], result["plan"])))
                 try:
                     args = json.loads(tool_call.function.arguments)
-                    if cid := args.get("conjunction_id"):
+                    if tool_call.function.name == "plan_collision_avoidance" and (
+                        cid := args.get("conjunction_id")
+                    ):
                         citations.append(str(cid))
+                    if tool_call.function.name == "plan_orbit_altitude_change" and (
+                        sid := args.get("sat_id")
+                    ):
+                        citations.append(f"orbit:{sid}")
                 except json.JSONDecodeError:
                     pass
 

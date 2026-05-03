@@ -11,7 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from node_api.config import settings
 from node_api.db.models import Base
 from node_api.db.session import SessionLocal, engine
-from node_api.routes import agent, conjunctions, maneuvers, satellites, spacecraft
+from node_api.routes import agent, conjunctions, maneuvers, planner, satellites, spacecraft
+from node_api.services.catalog_demo_iss_seed import ensure_demo_iss_catalog_row
 from node_api.services.conjunction_demo_pair_seed import ensure_demo_cross_plane_conjunction_pair
 
 
@@ -20,6 +21,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as session:
         ensure_demo_cross_plane_conjunction_pair(session)
+        ensure_demo_iss_catalog_row(session)
     yield
 
 
@@ -39,6 +41,7 @@ def create_app() -> FastAPI:
     app.include_router(satellites.router, prefix="/satellites", tags=["satellites"])
     app.include_router(conjunctions.router, prefix="/conjunctions", tags=["conjunctions"])
     app.include_router(maneuvers.router, prefix="/maneuvers", tags=["maneuvers"])
+    app.include_router(planner.router, prefix="/planner", tags=["planner"])
     app.include_router(agent.router, prefix="/agent", tags=["agent"])
 
     @app.get("/health", tags=["meta"])

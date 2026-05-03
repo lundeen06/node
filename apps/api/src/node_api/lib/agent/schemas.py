@@ -169,6 +169,37 @@ AGENT_TOOLS: list[dict[str, object]] = [
             "required": ["conjunction_id"],
         },
     },
+    {
+        "name": "plan_orbit_altitude_change",
+        "description": (
+            "Plan a **two-burn** coplanar transfer to a **circular** target orbit using a **Lambert** "
+            "leg (half-period transfer ellipse) plus a circularization burn. Uses the catalog TLE and "
+            "SGP4 state at ``reference_utc`` (or server UTC now). ``target_circular_altitude_km`` is "
+            "altitude above the mean Earth sphere (same R_E as physics util_dyn). Example: operator says "
+            "raise orbit to 650 km → pass target_circular_altitude_km=650 and the catalog sat_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sat_id": {
+                    "type": "string",
+                    "description": (
+                        "Catalog spacecraft: primary key sat_id, or NORAD digits (e.g. 25544), or a "
+                        "distinctive name substring — see get_operator_reference.catalog_entries"
+                    ),
+                },
+                "target_circular_altitude_km": {
+                    "type": "number",
+                    "description": "Desired circular altitude above mean Earth radius (km)",
+                },
+                "reference_utc": {
+                    "type": "string",
+                    "description": "Optional ISO-8601 UTC instant for SGP4 state (default: now)",
+                },
+            },
+            "required": ["sat_id", "target_circular_altitude_km"],
+        },
+    },
 ]
 
 

@@ -40,6 +40,7 @@ def test_import_lib_layers() -> None:
     )
     from node_api.lib.ingress import celestrak, constellation_presets, eop, space_track, space_weather  # noqa: F401
     from node_api.lib.mission import (  # noqa: F401
+        circular_altitude_transfer,
         collision_avoidance,
         deorbit,
         phasing,

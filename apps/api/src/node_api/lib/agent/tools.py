@@ -19,9 +19,14 @@ from node_api.db.models import ConjunctionEventRow, SpacecraftRow
 from node_api.db.session import SessionLocal
 from node_api.errors import InfeasibleProblemError
 from node_api.lib.agent.mock_store import HOUSE_RULES, SATELLITES
+from node_api.lib.agent.plan_validation import burn_epoch_future_validation_row
 from node_api.lib.ingress.constellation_presets import list_preset_ids
+from node_api.lib.mission.circular_altitude_transfer import (
+    plan_lambert_two_burn_circular_altitude_change,
+)
 from node_api.lib.mission.collision_avoidance import plan_collision_avoidance as run_lambert_plan
 from node_api.lib.tle_physics import trajectory_states_sgp4
+from node_api.services.spacecraft_catalog import resolve_spacecraft_row
 from node_api.services.conjunction_store import (
     get_conjunction_by_id,
     list_active_conjunctions_for_sat,
@@ -37,6 +42,58 @@ from node_api.types.state import Covariance6x6, StateVector
 from node_api.types.time import Epoch, TimeScale
 
 
+def plan_orbit_altitude_change(
+    sat_id: str,
+    target_circular_altitude_km: float,
+    reference_utc: str | None = None,
+) -> dict[str, Any]:
+    """Lambert transfer leg + circularization to a target **circular** altitude (km above mean Earth sphere)."""
+    db = SessionLocal()
+    try:
+        srow = resolve_spacecraft_row(db, sat_id)
+        if srow is None:
+            return {
+                "error": f"No catalog spacecraft matches {sat_id!r}.",
+                "hint": (
+                    "Call get_operator_reference: use catalog_entries[].sat_id, or the same NORAD id "
+                    "as norad_catalog_id, or a distinctive name substring (e.g. ISS (demo))."
+                ),
+            }
+        when = _parse_utc(reference_utc) if reference_utc else datetime.now(UTC)
+        plan_not_before = datetime.now(UTC)
+        _, r_km, v_km_s = trajectory_states_sgp4(srow.tle_line1, srow.tle_line2, [when])[0]
+        r1_m = np.asarray(r_km, dtype=np.float64) * 1000.0
+        v1_mps = np.asarray(v_km_s, dtype=np.float64) * 1000.0
+        dep_epoch = Epoch(instant=when, scale=TimeScale.UTC)
+        try:
+            plan = plan_lambert_two_burn_circular_altitude_change(
+                r1_m,
+                v1_mps,
+                float(target_circular_altitude_km),
+                dep_epoch,
+                srow.sat_id,
+            )
+        except InfeasibleProblemError as exc:
+            return {
+                "error": str(exc),
+                "hint": (
+                    "Target must be a circular altitude in km above Earth mean radius; initial and target "
+                    "radii must differ by enough for a Hohmann-like Lambert leg. Try a different altitude or "
+                    "reference_utc."
+                ),
+            }
+        return {
+            "plan": _maneuver_plan_to_tool_dict(plan, not_before=plan_not_before),
+            "note": (
+                "Two ECI burns: Lambert arc to the antipodal point on the target circular orbit, then "
+                "circularization. Coplanar with the current osculating plane from SGP4 at reference_utc "
+                "(server UTC if omitted)."
+            ),
+        }
+    finally:
+        db.close()
+
+
 def _parse_utc(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(UTC)
 
@@ -48,18 +105,28 @@ def get_operator_reference() -> dict[str, Any]:
         catalog_ids = list(
             db.scalars(select(SpacecraftRow.sat_id).order_by(SpacecraftRow.sat_id).limit(500)),
         )
+        catalog_rows = list(
+            db.scalars(select(SpacecraftRow).order_by(SpacecraftRow.sat_id).limit(300)),
+        )
+        catalog_entries = [
+            {"sat_id": r.sat_id, "norad_catalog_id": r.norad_catalog_id, "name": r.name}
+            for r in catalog_rows
+        ]
     finally:
         db.close()
     return {
         "house_rule_constellation_ids": sorted(HOUSE_RULES.keys()),
         "space_track_ingest_preset_ids": list_preset_ids(),
         "catalog_satellite_ids": catalog_ids,
+        "catalog_entries": catalog_entries,
         "mock_satellite_registry_ids": sorted(SATELLITES.keys()),
         "notes": [
             "House rules (Pc threshold, max auto-dV) use house_rule_constellation_ids — in this build "
             "that is mainly EO-CONSTELLATION for mock fuel/state.",
             "space_track_ingest_preset_ids are lowercase keys for importing GP data (e.g. starlink); "
             "they are not the same strings as house_rule_constellation_ids.",
+            "Orbit tools resolve catalog rows by sat_id, NORAD catalog id (digits), or name substring — "
+            "prefer catalog_entries for exact sat_id when calling plan_orbit_altitude_change.",
         ],
     }
 
@@ -296,7 +363,8 @@ def _satellite_state_from_row(srow: SpacecraftRow, when: datetime) -> SatelliteS
     )
 
 
-def _maneuver_plan_to_tool_dict(plan: ManeuverPlan) -> dict[str, Any]:
+def _maneuver_plan_to_tool_dict(plan: ManeuverPlan, *, not_before: datetime | None = None) -> dict[str, Any]:
+    ref = (not_before or datetime.now(UTC)).astimezone(UTC)
     maneuvers: list[dict[str, Any]] = []
     for m in plan.maneuvers:
         dv = np.asarray(m.delta_v.data, dtype=np.float64).reshape(3)
@@ -310,6 +378,11 @@ def _maneuver_plan_to_tool_dict(plan: ManeuverPlan) -> dict[str, Any]:
                 "duration_s": m.duration_s,
             },
         )
+    validation = [
+        {"passed": v.passed, "check_id": v.check_id, "message": v.message}
+        for v in plan.validation_results
+    ]
+    validation.append(burn_epoch_future_validation_row(maneuvers, ref))
     return {
         "plan_id": str(uuid.uuid4()),
         "sat_id": plan.sat_id,
@@ -317,10 +390,7 @@ def _maneuver_plan_to_tool_dict(plan: ManeuverPlan) -> dict[str, Any]:
         "total_delta_v_mps": plan.total_delta_v_mps,
         "objective": plan.objective,
         "generated_by": plan.generated_by.value,
-        "validation": [
-            {"passed": v.passed, "check_id": v.check_id, "message": v.message}
-            for v in plan.validation_results
-        ],
+        "validation": validation,
     }
 
 
@@ -331,20 +401,28 @@ def plan_collision_avoidance(conjunction_id: str, sat_id: str) -> dict[str, Any]
         row = get_conjunction_by_id(db, conjunction_id)
         if row is None:
             return {"error": "Unknown conjunction_id; run catalog-screen first."}
-        if row.primary_id != sat_id:
+        primary_row = resolve_spacecraft_row(db, row.primary_id)
+        if primary_row is None:
+            return {"error": f"No catalog spacecraft matches conjunction primary {row.primary_id!r}."}
+        srow = resolve_spacecraft_row(db, sat_id)
+        if srow is None:
+            return {
+                "error": f"No catalog spacecraft matches {sat_id!r}.",
+                "hint": "Use conjunction primary sat_id or NORAD/name per get_operator_reference.catalog_entries.",
+            }
+        if srow.sat_id != primary_row.sat_id:
             return {
                 "error": (
-                    f"sat_id must be the conjunction primary {row.primary_id!r}; "
-                    f"got {sat_id!r}."
+                    f"sat_id must identify the same catalog object as the primary "
+                    f"({primary_row.sat_id!r}, NORAD {primary_row.norad_catalog_id}); "
+                    f"resolved to {srow.sat_id!r}."
                 ),
             }
-        srow = db.get(SpacecraftRow, sat_id)
-        if srow is None:
-            return {"error": f"No catalog spacecraft row for {sat_id!r}."}
         when = datetime.now(UTC)
+        plan_not_before = when
         ego = _satellite_state_from_row(srow, when)
         cj = _conjunction_from_row(row)
-        rules = _house_rules_for_sat(sat_id)
+        rules = _house_rules_for_sat(srow.sat_id)
         try:
             plan = run_lambert_plan(ego, cj, rules)
         except InfeasibleProblemError as exc:
@@ -356,7 +434,7 @@ def plan_collision_avoidance(conjunction_id: str, sat_id: str) -> dict[str, Any]
                 ),
             }
         return {
-            "plan": _maneuver_plan_to_tool_dict(plan),
+            "plan": _maneuver_plan_to_tool_dict(plan, not_before=plan_not_before),
             "note": (
                 "Lambert single-impulse avoidance (multi-lead timing search) from SGP4 state at server UTC now."
             ),
@@ -373,9 +451,9 @@ def check_maneuver_feasibility(conjunction_id: str) -> dict[str, Any]:
         if row is None:
             return {"error": "Unknown conjunction_id; run catalog-screen first."}
         sat_id = row.primary_id
-        srow = db.get(SpacecraftRow, sat_id)
+        srow = resolve_spacecraft_row(db, sat_id)
         if srow is None:
-            return {"error": f"No catalog spacecraft row for primary {sat_id!r}."}
+            return {"error": f"No catalog spacecraft matches primary {sat_id!r}."}
         when = datetime.now(UTC)
         ego = _satellite_state_from_row(srow, when)
         cj = _conjunction_from_row(row)
@@ -415,4 +493,5 @@ TOOL_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "estimate_post_maneuver_pc": estimate_post_maneuver_pc,
     "plan_collision_avoidance": plan_collision_avoidance,
     "check_maneuver_feasibility": check_maneuver_feasibility,
+    "plan_orbit_altitude_change": plan_orbit_altitude_change,
 }

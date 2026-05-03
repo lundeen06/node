@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import uuid
+import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -14,6 +14,18 @@ from node_api.db.models import SpacecraftRow
 from node_api.lib.pair_conjunction_sgp4 import screen_pair_sphere_sgp4
 from node_api.lib.tle_physics import sgp4_position_eci_m
 from node_api.lib.trajectory_maneuver_preview import trajectory_preview_maneuvers_m
+
+# TCA bucket size (seconds) for stable IDs across catalog-screen re-runs (same pair + window → same CNJ id).
+_STABLE_CNJ_TCA_BUCKET_S = 300
+
+
+def stable_catalog_conjunction_event_id(primary_sat_id: str, secondary_sat_id: str, tca_utc: datetime) -> str:
+    """Deterministic event id so SQLite survives periodic re-screening without invalidating agent/UI refs."""
+    a, b = sorted((primary_sat_id, secondary_sat_id))
+    t_bucket = int(tca_utc.astimezone(UTC).timestamp() // _STABLE_CNJ_TCA_BUCKET_S)
+    raw = f"{a}\x00{b}\x00{t_bucket}"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10].upper()
+    return f"CNJ-{digest}"
 
 
 def _position_km_m(row: SpacecraftRow, when_utc: datetime) -> np.ndarray:
@@ -194,7 +206,7 @@ def screen_catalog_close_approaches(
         except Exception:
             eci_mid_m = (0.0, 0.0, 0.0)
 
-        eid = f"CNJ-{uuid.uuid4().hex[:10].upper()}"
+        eid = stable_catalog_conjunction_event_id(a.sat_id, b.sat_id, tca)
         primary_m = (float(pa[0] * 1000.0), float(pa[1] * 1000.0), float(pa[2] * 1000.0))
         secondary_m = (float(pb[0] * 1000.0), float(pb[1] * 1000.0), float(pb[2] * 1000.0))
         events.append(

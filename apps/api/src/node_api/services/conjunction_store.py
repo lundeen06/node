@@ -79,6 +79,43 @@ def get_conjunction_by_id(session: Session, conjunction_id: str) -> ConjunctionE
     return session.get(ConjunctionEventRow, conjunction_id)
 
 
+def upsert_operator_conjunction_context(session: Session, cc: dict[str, Any]) -> None:
+    """Merge UI-selected conjunction into SQLite so agent tools resolve it for this turn."""
+    cid = cc.get("conjunction_id")
+    if not cid or not isinstance(cid, str):
+        return
+    pid = cc.get("primary_sat_id")
+    sid = cc.get("secondary_sat_id")
+    if not pid or not sid:
+        return
+    tca_raw = cc.get("tca_utc")
+    if not tca_raw:
+        return
+    try:
+        tca = datetime.fromisoformat(str(tca_raw).replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return
+    miss = float(cc["miss_distance_km"]) if cc.get("miss_distance_km") is not None else 0.0
+    pc = float(cc["pc_heuristic"]) if cc.get("pc_heuristic") is not None else 0.0
+    now = datetime.now(UTC)
+    session.merge(
+        ConjunctionEventRow(
+            id=cid,
+            primary_id=str(pid),
+            secondary_id=str(sid),
+            tca_utc=tca,
+            miss_distance_km=miss,
+            relative_velocity_km_s=0.0,
+            pc=pc,
+            pc_method="SCREEN_HEURISTIC",
+            source=str(cc.get("source") or "CATALOG_SCREEN"),
+            status="NEW",
+            created_at=now,
+        ),
+    )
+    session.commit()
+
+
 def list_all_active_conjunctions(
     session: Session,
     *,

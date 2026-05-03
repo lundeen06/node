@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -187,3 +188,36 @@ def spacecraft_positions_geojson(
             continue
 
     return {"type": "FeatureCollection", "features": features}
+
+
+def resolve_spacecraft_row(session: Session, identifier: str) -> SpacecraftRow | None:
+    """Resolve a catalog row by ``sat_id``, NORAD id (digits or embedded in text), or name substring.
+
+    Primary key match wins, then NORAD (exact numeric string or first 5–7 digit run), then
+    case-insensitive ``name`` ilike ``%…%`` (sanitized substring, min length 3).
+    """
+    key = (identifier or "").strip()
+    if not key:
+        return None
+    row = session.get(SpacecraftRow, key)
+    if row is not None:
+        return row
+    if key.isdigit():
+        nid = int(key)
+        return session.scalars(
+            select(SpacecraftRow).where(SpacecraftRow.norad_catalog_id == nid).limit(1),
+        ).first()
+    m = re.search(r"\b(\d{5,7})\b", key)
+    if m:
+        nid = int(m.group(1))
+        hit = session.scalars(
+            select(SpacecraftRow).where(SpacecraftRow.norad_catalog_id == nid).limit(1),
+        ).first()
+        if hit is not None:
+            return hit
+    safe = "".join(c for c in key if c.isprintable() and c not in "%_\\")[:120]
+    if len(safe) >= 3:
+        return session.scalars(
+            select(SpacecraftRow).where(SpacecraftRow.name.ilike(f"%{safe}%")).limit(1),
+        ).first()
+    return None
