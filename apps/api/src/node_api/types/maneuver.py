@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
+from node_api.compat_enum import StrEnum
 from typing import NewType, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -72,6 +72,10 @@ class ManeuverPlan(BaseModel):
     generated_by: PlanOrigin
     generated_at: Epoch
     validation_results: list[ValidationOutcome] = Field(default_factory=list)
+    time_of_flight_s: float | None = Field(
+        default=None,
+        description="Seconds from first maneuver epoch to terminal epoch (e.g. Lambert TOF).",
+    )
 
 
 class ThrustProfileStub(BaseModel):
