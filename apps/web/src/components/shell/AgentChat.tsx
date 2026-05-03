@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { postAgentTurn } from "@/lib/api";
+import { ApiError, getApiBaseUrl, postAgentTurn } from "@/lib/api";
 import type { AgentTurnResponse, ChatMessage, PlanResponse } from "@/lib/types";
 import { useOpsShell } from "@/components/shell/OpsShellContext";
 import { useSimClock } from "@/components/shell/SimClockContext";
@@ -479,44 +479,33 @@ export function AgentChat() {
 
   useEffect(() => {
     const raw = localStorage.getItem(STORAGE_BUNDLE);
-    let bundle: ChatBundle;
+    let priorSessions: ChatSession[] = [];
 
     if (raw) {
       try {
         const parsed = JSON.parse(raw) as ChatBundle;
-        if (!parsed.sessions?.length) throw new Error("empty");
-        bundle = parsed;
-      } catch {
-        bundle = migrateLegacyBundle() ?? { sessions: [newSession()], activeSessionId: "" };
-        if (!bundle.activeSessionId && bundle.sessions[0]) {
-          bundle.activeSessionId = bundle.sessions[0].id;
+        if (Array.isArray(parsed.sessions)) {
+          priorSessions = parsed.sessions;
         }
+      } catch {
+        priorSessions = [];
       }
     } else {
-      bundle = migrateLegacyBundle() ?? { sessions: [newSession()], activeSessionId: "" };
-      if (!bundle.activeSessionId && bundle.sessions[0]) {
-        bundle.activeSessionId = bundle.sessions[0].id;
-      }
+      const migrated = migrateLegacyBundle();
+      if (migrated) priorSessions = migrated.sessions;
     }
 
-    let sessionsOut = bundle.sessions;
-    let activeId = bundle.activeSessionId;
-    let active = sessionsOut.find((s) => s.id === activeId) ?? sessionsOut[0];
-    if (!active) {
-      const s = newSession();
-      sessionsOut = [s];
-      activeId = s.id;
-      active = s;
-    }
+    const fresh = newSession();
+    const sessionsOut = [fresh, ...priorSessions.filter((s) => s.id !== fresh.id)];
 
-    persistBundle(sessionsOut, active.id);
+    persistBundle(sessionsOut, fresh.id);
 
     setSessions(sessionsOut);
-    setActiveSessionId(active.id);
-    setMessages(active.messages);
-    setProposedPlans(active.proposedPlans);
-    setPlanAnchorIndex(active.planAnchorIndex);
-    sessionId.current = active.apiSessionId;
+    setActiveSessionId(fresh.id);
+    setMessages(fresh.messages);
+    setProposedPlans(fresh.proposedPlans);
+    setPlanAnchorIndex(fresh.planAnchorIndex);
+    sessionId.current = fresh.apiSessionId;
     setHydrated(true);
   }, [persistBundle]);
 
@@ -727,7 +716,19 @@ export function AgentChat() {
         setTypingVisible("");
         setAgentPhase("typing");
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Unknown error";
+        const base = getApiBaseUrl();
+        let msg =
+          err instanceof ApiError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : "Unknown error";
+        if (
+          err instanceof TypeError ||
+          (typeof msg === "string" && /failed to fetch/i.test(msg))
+        ) {
+          msg = `Cannot reach the API at ${base}. Start uvicorn in apps/api (port 8000) and set NEXT_PUBLIC_API_BASE_URL in apps/web/.env.local if needed.`;
+        }
         setMessages((prev) => [...prev, { role: "assistant", content: `[Error contacting agent: ${msg}]` }]);
         pendingPlansRef.current = null;
         setAgentPhase("idle");

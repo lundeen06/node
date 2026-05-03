@@ -9,7 +9,6 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 
-import logoImg from "./logo.png";
 import { useSimClock } from "./SimClockContext";
 
 export function TopBar() {
@@ -58,11 +57,11 @@ export function TopBar() {
           aria-label="node home"
         >
           <Image
-            src={logoImg}
-            alt=""
-            width={128}
-            height={128}
-            className="h-24 w-24 object-contain drop-shadow-sm transition-transform group-hover:scale-[1.03]"
+            src="/logo.png"
+            alt="node"
+            width={96}
+            height={96}
+            className="h-12 w-12 object-contain drop-shadow-sm transition-transform group-hover:scale-[1.03]"
             priority
           />
         </Link>
@@ -72,7 +71,6 @@ export function TopBar() {
 
       <nav className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/20 p-0.5">
         {navPill("/ops", "Ops", pathname === "/ops" || pathname?.startsWith("/ops/"))}
-        {navPill("/planner/EO-12", "Planner", Boolean(pathname?.startsWith("/planner")))}
       </nav>
 
       <div className="ml-auto flex flex-wrap items-center justify-end gap-2 sm:gap-3">

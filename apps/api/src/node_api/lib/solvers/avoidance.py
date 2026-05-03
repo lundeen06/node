@@ -109,7 +109,17 @@ def _solve_impulsive_avoidance_with_lead(
     if tle_line1 and tle_line2:
         departure = _departure_state_at_burn(ego, maneuver_epoch, tle_line1, tle_line2)
     else:
-        departure = ego.state_vector.model_copy(update={"epoch": maneuver_epoch})
+        r_now = np.asarray(ego.state_vector.position_km.data, dtype=np.float64).reshape(3)
+        v_now = np.asarray(ego.state_vector.velocity_km_s.data, dtype=np.float64).reshape(3)
+        dt_to_burn_s = (maneuver_epoch.as_utc_datetime() - ego.state_vector.epoch.as_utc_datetime()).total_seconds()
+        r0_prop, v0_prop = _propagate_two_body_cartesian_km(r_now, v_now, dt_to_burn_s)
+        departure = ego.state_vector.model_copy(
+            update={
+                "position_km": Vector3(data=r0_prop),
+                "velocity_km_s": Vector3(data=v0_prop),
+                "epoch": maneuver_epoch,
+            },
+        )
     r0 = np.asarray(departure.position_km.data, dtype=np.float64).reshape(3)
     v0 = np.asarray(departure.velocity_km_s.data, dtype=np.float64).reshape(3)
 
