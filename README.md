@@ -1,8 +1,19 @@
-# node
+# NODE
 
-**node** is a constellation management platform: situational awareness (**Three.js** globe with propagated orbits) and an AI agent that proposes maneuvers backed by a **typed Python function library** (propagation, screening, solvers, validation, gated actions).
+**NODE is an AI-assisted operations workspace for satellite constellations.** It combines a live Three.js orbital view with conjunction screening, maneuver analysis, and an agent that can assemble plans from a typed astrodynamics library—while keeping consequential actions behind operator approval.
 
-This repository is a **scaffold**: Pydantic models and function signatures are production-shaped, but implementations are stubs (`raise NotImplementedError`). The web app is a polished **demo shell** with mock data.
+Built during the [2026 National Security Hackathon](https://cerebralvalley.ai/e/3rd-annual-natsec-hackathon), hosted by Shield and Cerebral Valley with the U.S. Army xTech program.
+
+## What we built
+
+- **Fleet situational awareness** — propagated spacecraft, ground tracks, conjunction markers, and maneuver overlays on an interactive 3D globe
+- **Conjunction response** — catalog screening and collision-avoidance previews backed by Keplerian, SGP4, Lambert, and maneuver utilities
+- **Agentic planning** — an AI operator interface with structured tools, plan validation, catalog-aware context, and approval gates
+- **Mission analysis** — ground-track, transfer, phasing, plane-change, finite-burn, and mission-economics utilities
+
+## Project status
+
+NODE is a hackathon prototype, not a flight-operations product. The repository contains working vertical slices and automated tests alongside demo data and intentionally unfinished extension points. The typed interfaces make the boundary clear between implemented analysis paths and future production integrations.
 
 ## Layout
 
